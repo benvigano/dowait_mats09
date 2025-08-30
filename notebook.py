@@ -26,13 +26,16 @@ core.print_timestamped_message(f"Results will be saved to: {EXCEL_RESULTS_PATH}"
 
 
 # %%
-# --- 2. Model and Tokenizer Loading ---
+# ============================================================
+# PHASE 1: SETUP (MODEL, TOKENIZER, DATASET)
+# ============================================================
+
+# --- 2. Load Model and Tokenizer ---
+# Load HuggingFace model for generation
 model, tokenizer = core.load_model_and_tokenizer()
-core.print_timestamped_message("Model and tokenizer loaded.")
+core.print_timestamped_message("✅ HuggingFace model and tokenizer loaded")
 
-
-# %%
-# --- 3. Dataset Loading ---
+# --- 3. Load Dataset ---
 core.print_timestamped_message("Loading dataset...")
 full_dataset = load_dataset("EleutherAI/hendrycks_math", "algebra", split='test')
 
@@ -48,42 +51,46 @@ display(dataset)
 core.print_timestamped_message("Dataset loaded.")
 
 # %%
-# --- 4. Baseline Experiment ---
-# We generate solutions for the dataset without any interventions to see the model's default performance.
-# All results, including errors, are saved to the 'Baseline_Results' sheet in our Excel file.
+# ============================================================
+# PHASE 1: BASELINE EXPERIMENT
+# ============================================================
+core.print_timestamped_message("=" * 60)
+core.print_timestamped_message("🎯 STARTING BASELINE EXPERIMENT")
+core.print_timestamped_message("=" * 60)
+
 results_df = core.run_baseline_experiment(dataset, model, tokenizer, EXCEL_RESULTS_PATH)
-display(results_df.head())
+core.print_timestamped_message(f"✅ Baseline experiment completed: {len(results_df)} problems processed")
 
 
 # %%
-# --- 5. Error Identification ---
-# For the examples the model got wrong, we use an external LLM to find the specific sentence where the error occurs.
-# Results are saved to the 'Error_Analysis' sheet.
-error_analysis_df = core.identify_errors(results_df, EXCEL_RESULTS_PATH)
+# ============================================================
+# PHASE 2: ERROR IDENTIFICATION  
+# ============================================================
+core.print_timestamped_message("")
+core.print_timestamped_message("=" * 60)
+core.print_timestamped_message("🔍 STARTING ERROR IDENTIFICATION")
+core.print_timestamped_message("=" * 60)
+
+error_analysis_df = core.identify_errors(results_df, EXCEL_RESULTS_PATH, tokenizer=tokenizer, use_token_indexing=True)
 if not error_analysis_df.empty:
-    display(error_analysis_df.head())
+    core.print_timestamped_message(f"✅ Error identification completed: {len(error_analysis_df)} problems analyzed")
 
 
 # %%
-# --- 6. Insertion Test (Reverse Lanham Test) ---
-# We test if we can correct the model's reasoning by injecting a 'Corrective' phrase 
-# right before the identified error. We compare this to 'Neutral' and 'Confirmation' phrases.
-# Results are saved to the 'Insertion_Test' sheet.
+# ============================================================
+# PHASE 3: INTERVENTION TESTING
+# ============================================================
+core.print_timestamped_message("")
+core.print_timestamped_message("=" * 60)
+core.print_timestamped_message("💉 STARTING INTERVENTION TESTING")
+core.print_timestamped_message("=" * 60)
 
-# Define our experimental conditions
-intervention_phrases = {
-    "Corrective_Strong": " Wait, I made a mistake.",
-    "Corrective_Alert": " Hold on!",
-    "Corrective_Reconsider": " Wait, I need to reconsider.",
-    "Corrective_Wrong": " Wait, that was wrong!",
-    "Corrective_Original": " Wait, let me re-evaluate that.",
-    "Neutral": " And,",
-    "Confirmation": " Continuing,"
-}
+# Use intervention phrases from core constants
+intervention_phrases = core.CURRENT_INTERVENTIONS
 
 intervention_df = core.run_insertion_test(error_analysis_df, model, tokenizer, intervention_phrases, EXCEL_RESULTS_PATH)
 if not intervention_df.empty:
-    display(intervention_df.head())
+    core.print_timestamped_message(f"✅ Intervention testing completed: {len(intervention_df)} interventions tested")
 
 
 # %%
@@ -162,11 +169,16 @@ if core.DEBUG_MODE:
 # %%
 # --- 7. Activation Patching Setup ---
 # We now prepare for the main causal analysis. We need to find a 'clean' run (where our 
-# 'Corrective' intervention worked) and a 'corrupted' run (where the 'Confirmation' 
-# intervention failed on the same problem).
+# 'Corrective' intervention worked) and a 'corrupted' run (where the original uninformed 
+# continuation failed on the same problem).
 
+# %%
+# ============================================================
+# PHASE 4: ACTIVATION PATCHING ANALYSIS
+# ============================================================
+# Load TransformerLens model for activation patching
+tl_model = core.load_tl_model(model)
 core.print_timestamped_message("Setting up activation patching experiment...")
-source_prompt, destination_prompt, source_answer_text, destination_answer_text = [None] * 4
 
 if not intervention_df.empty:
     pivot_df = intervention_df.pivot(index='problem', columns='condition', values='is_corrected')
@@ -191,75 +203,58 @@ if not intervention_df.empty:
         target_problem = successful_candidates.index[0]
         core.print_timestamped_message(f"Found a perfect candidate for patching: {target_problem[:80]}...")
         
-        # Reconstruct the prompts and answers from our previous experimental data
-        # Find the original generation data for this specific problem
+        # Reconstruct prompts from our data
         analyzable_row = error_analysis_df[error_analysis_df['problem'] == target_problem].iloc[0]
         original_cot = analyzable_row['full_generated_solution']
-        error_sentence = analyzable_row['error_sentence']
-        error_index = original_cot.find(error_sentence)
-        truncated_cot = original_cot[:error_index]
+        mistake_sentence = analyzable_row['mistake_sentence']
+        mistake_index = original_cot.find(mistake_sentence)
+        truncated_cot = original_cot[:mistake_index]
 
+        # Define source (clean) and destination (corrupted) prompts
         source_prompt = truncated_cot + intervention_phrases[best_corrective_condition]
-        destination_prompt = truncated_cot  # Original uninformed continuation (no intervention)
+        destination_prompt = truncated_cot  # Original uninformed continuation
 
         source_full_cot = intervention_df[(intervention_df['problem'] == target_problem) & (intervention_df['condition'] == best_corrective_condition)].iloc[0]['intervened_cot']
-        destination_full_cot = original_cot  # Use the original incorrect reasoning
-        
+        destination_full_cot = original_cot
+
         core.print_timestamped_message(f"Using corrective condition: {best_corrective_condition}")
         core.print_timestamped_message("Comparing corrected intervention vs. original uninformed continuation")
 
-        source_answer_text = source_full_cot[len(source_prompt):].strip()
-        destination_answer_text = destination_full_cot[len(destination_prompt):].strip()
+        # Define correct and incorrect answers for logit diff calculation
+        source_answer_text = core.extract_boxed_answer(source_full_cot)
+        destination_answer_text = core.extract_boxed_answer(destination_full_cot)
+
+        # --- 8. Run Activation Patching ---
+        patching_results_df = core.get_patching_results(
+            tl_model, 
+            source_prompt, 
+            destination_prompt,
+            source_answer_text,
+            destination_answer_text,
+            excel_path=EXCEL_RESULTS_PATH,
+            problem_id=analyzable_row['problem_id'],
+            corrective_condition=best_corrective_condition
+        )
         
-        print(f"Source (Clean) Prompt: '{source_prompt}'")
-        print(f"Destination (Corrupted) Prompt: '{destination_prompt}'")
-    else:
-        core.print_timestamped_message("Could not find a perfect clean/corrupted pair. Skipping activation patching.")
-else:
-    core.print_timestamped_message("No intervention data available. Skipping activation patching.")
+        # --- 9. Visualize Results ---
+        if not patching_results_df.empty:
+            # Separate attention and MLP data for visualization
+            attention_results = patching_results_df[patching_results_df['component'].str.contains('Head')]
+            mlp_results = patching_results_df[patching_results_df['component'] == 'MLP']
 
+            # Summarize Attention Heads results
+            if not attention_results.empty:
+                print(f"Attention heads results: {len(attention_results)} components analyzed")
+                print(f"Top 5 attention heads by logit diff change:")
+                top_attn = attention_results.nlargest(5, 'logit_diff_change')[['layer', 'component', 'logit_diff_change']]
+                print(top_attn.to_string(index=False))
 
-# %%
-# --- 8. Running the Patching Experiment ---
-# If a suitable pair was found, we load the model into TransformerLens and run the patching experiment.
-# This identifies which model components (attention heads, MLPs) are causally responsible for the self-correction.
-# Results are saved to the 'Activation_Patching' sheet.
-
-if source_prompt:
-    core.print_timestamped_message("Loading model into TransformerLens...")
-    tl_model = core.load_tl_model(model)
-    
-    patching_results_df = core.get_patching_results(
-        model=tl_model,
-        source_text=source_prompt,
-        destination_text=destination_prompt,
-        source_answer=source_answer_text,
-        destination_answer=destination_answer_text,
-        excel_path=EXCEL_RESULTS_PATH,
-        problem_id=target_problem,
-        corrective_condition=best_corrective_condition
-    )
-    
-    # --- 9. Visualizing Patching Results ---
-    core.print_timestamped_message("Visualizing patching results...")
-    
-    # Separate attention and MLP data for visualization
-    attention_results = patching_results_df[patching_results_df['component'].str.contains('Head')]
-    mlp_results = patching_results_df[patching_results_df['component'] == 'MLP']
-
-    # Summarize Attention Heads results
-    if not attention_results.empty:
-        print(f"Attention heads results: {len(attention_results)} components analyzed")
-        print(f"Top 5 attention heads by logit diff change:")
-        top_attn = attention_results.nlargest(5, 'logit_diff_change')[['layer', 'component', 'logit_diff_change']]
-        print(top_attn.to_string(index=False))
-
-    # Summarize MLP Layers results
-    if not mlp_results.empty:
-        print(f"\nMLP layers results: {len(mlp_results)} layers analyzed")
-        print(f"Top 5 MLP layers by logit diff change:")
-        top_mlp = mlp_results.nlargest(5, 'logit_diff_change')[['layer', 'component', 'logit_diff_change']]
-        print(top_mlp.to_string(index=False))
+            # Summarize MLP Layers results
+            if not mlp_results.empty:
+                print(f"\nMLP layers results: {len(mlp_results)} layers analyzed")
+                print(f"Top 5 MLP layers by logit diff change:")
+                top_mlp = mlp_results.nlargest(5, 'logit_diff_change')[['layer', 'component', 'logit_diff_change']]
+                print(top_mlp.to_string(index=False))
 
 core.print_timestamped_message("Script finished.")
 
