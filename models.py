@@ -35,6 +35,11 @@ class ModelInterface(ABC):
     def get_model_for_patching(self) -> Any:
         """Return a model instance suitable for activation patching."""
         pass
+    
+    @abstractmethod 
+    def get_nnsight_model(self) -> Any:
+        """Return a model instance suitable for nnsight operations."""
+        pass
 
 
 class HuggingFaceModel(ModelInterface):
@@ -57,12 +62,14 @@ class HuggingFaceModel(ModelInterface):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Load model
+        # Native loading for all models - no quantization for better activation analysis
+        print_timestamped_message("Loading model natively with bfloat16 precision...")
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True
+            device_map={"": 0},  # Force everything on GPU 0 for predictable memory management
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
         )
         
         print_timestamped_message("HuggingFace model loaded successfully.")
@@ -72,8 +79,9 @@ class HuggingFaceModel(ModelInterface):
                  temperature: float = 0.2, top_p: float = 0.75, 
                  do_sample: bool = True) -> str:
         """Generate text using HuggingFace model with caching."""
-        # Check cache first
-        cached_result = get_from_generation_cache(prompt, self.model_id)
+        # Check cache first using normalized model ID
+        cache_model_id = self.get_model_id()
+        cached_result = get_from_generation_cache(prompt, cache_model_id)
         if cached_result is not None:
             return cached_result
         
@@ -101,11 +109,14 @@ class HuggingFaceModel(ModelInterface):
         
         # Only save to cache if generation was successful (no errors)
         if not generated_text.startswith("Error"):
-            save_to_generation_cache(prompt, generated_text, self.model_id)
+            save_to_generation_cache(prompt, generated_text, cache_model_id)
         
         return generated_text
     
     def get_model_id(self) -> str:
+        # Normalize Qwen model IDs to match Nebius cache keys
+        if "qwen3" in self.model_id.lower() or "qwen/qwen3" in self.model_id.lower():
+            return "nebius-Qwen/Qwen3-14B"  # Match the Nebius cache format
         return self.model_id
     
     def get_model_for_patching(self) -> HookedTransformer:
@@ -137,6 +148,40 @@ class HuggingFaceModel(ModelInterface):
 
         print_timestamped_message("✅ HookedTransformer loaded directly.")
         return self.hooked_model
+    
+    def get_nnsight_model(self) -> Any:
+        """Return model for nnsight operations. Reloads with int4 quantization if needed."""
+        try:
+            import nnsight
+            
+            # Print memory status before loading
+            if torch.cuda.is_available():
+                gpu_memory_before = torch.cuda.memory_allocated() / 1024**3
+                print_timestamped_message(f"GPU memory before loading: {gpu_memory_before:.2f}GB")
+            
+            # Always reload the model for nnsight to ensure clean state
+            print_timestamped_message("Loading fresh model instance for nnsight operations...")
+            if self.model is not None:
+                # Clear existing model first
+                self.model = drop_model_from_memory(self.model)
+            
+            # Reload model (will use int4 quantization for Qwen3)
+            self._load_model()
+            
+            # Print memory status after loading
+            if torch.cuda.is_available():
+                gpu_memory_after = torch.cuda.memory_allocated() / 1024**3
+                print_timestamped_message(f"GPU memory after loading: {gpu_memory_after:.2f}GB")
+            
+            # Wrap with nnsight - this allows us to trace activations
+            nnsight_model = nnsight.LanguageModel(self.model, tokenizer=self.tokenizer)
+            return nnsight_model
+        except ImportError:
+            print_timestamped_message("⚠️ nnsight not available. Install with: pip install nnsight")
+            return None
+        except Exception as e:
+            print_timestamped_message(f"⚠️ Failed to create nnsight model: {e}")
+            return None
 
 
 class NebiusModel(ModelInterface):
@@ -203,6 +248,11 @@ class NebiusModel(ModelInterface):
     def get_model_for_patching(self) -> Any:
         """Activation patching is not supported for API-based models."""
         print_timestamped_message("⚠️ Activation patching not supported for NebiusModel.")
+        return None
+    
+    def get_nnsight_model(self) -> Any:
+        """NNsight is not supported for API-based models."""
+        print_timestamped_message("⚠️ NNsight not supported for NebiusModel.")
         return None
 
 
@@ -272,6 +322,38 @@ class HybridQwen3Model(ModelInterface):
         except Exception as e:
             print_timestamped_message(f"⚠️ Failed to load HookedTransformer: {e}")
             return None
+    
+    def get_nnsight_model(self) -> Any:
+        """Return nnsight model for activation steering (uses HuggingFace model)."""
+        try:
+            import nnsight
+            
+            if self.hf_tokenizer is None:
+                print_timestamped_message("⚠️ Cannot create nnsight model without tokenizer")
+                return None
+            
+            # Load the HuggingFace model for nnsight
+            print_timestamped_message(f"Loading HuggingFace model for nnsight: '{self.hf_model_id}'...")
+            
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                self.hf_model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True
+            )
+            
+            # Wrap with nnsight
+            nnsight_model = nnsight.LanguageModel(hf_model, tokenizer=self.hf_tokenizer)
+            
+            print_timestamped_message("✅ NNsight model loaded successfully")
+            return nnsight_model
+            
+        except ImportError:
+            print_timestamped_message("⚠️ nnsight not available. Install with: pip install nnsight")
+            return None
+        except Exception as e:
+            print_timestamped_message(f"⚠️ Failed to create nnsight model: {e}")
+            return None
 
 
 # Removed: TransformerLensModel class
@@ -294,7 +376,7 @@ def create_model(model_type: str, model_id: str) -> ModelInterface:
 
 
 def drop_model_from_memory(model):
-    """Safely drop a model from memory to prevent OOM."""
+    """Aggressively drop a model from memory to prevent OOM."""
     if model is not None:
         print_timestamped_message("🗑️ Dropping model from memory to prevent OOM...")
         
@@ -309,9 +391,19 @@ def drop_model_from_memory(model):
             underlying_model.cpu()
         del underlying_model
         
-        # Clear GPU cache
+        # Aggressive memory cleanup
+        import gc
+        gc.collect()
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()  # More aggressive cleanup
+            torch.cuda.synchronize()
+            
+            # Multiple cleanup passes
+            for _ in range(3):
+                gc.collect()
+                torch.cuda.empty_cache()
         
         print_timestamped_message("✅ Model dropped from memory")
         return None

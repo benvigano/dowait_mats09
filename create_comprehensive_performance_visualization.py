@@ -79,8 +79,9 @@ def calculate_accuracy(correct, total):
 
 # Create subplots with cumulative performance analysis and regression
 fig = make_subplots(
-    rows=7, cols=1,
+    rows=8, cols=1,
     subplot_titles=[
+        'Problem Distribution by Complexity Level (Stratified Sample)',
         'Baseline Accuracy by Difficulty Level',
         'Baseline Accuracy by Problem Type', 
         'Intervention Success Rate by Difficulty Level',
@@ -89,15 +90,36 @@ fig = make_subplots(
         'Cumulative Performance by Subject (Baseline + Corrections)',
         'Baseline vs Intervention Performance Relationship'
     ],
-    vertical_spacing=0.15,  # Adjusted for more rows
-    specs=[[{"secondary_y": False}]] * 7
+    vertical_spacing=0.07,  # Reduced spacing to accommodate pie chart
+    specs=[[{"type": "pie"}]] + [[{"secondary_y": False}]] * 6 + [[{"secondary_y": False}]],  # Pie chart + standard plots + scatter plot
+    row_heights=[0.15, 0.11, 0.11, 0.11, 0.11, 0.11, 0.11, 0.38]  # Adjusted heights to fit 8 plots
 )
 
 # Colors
 deepseek_color = '#2E8B57'  # Sea Green
 qwen_color = '#4169E1'      # Royal Blue
 
-# Plot 1: Baseline Accuracy by Difficulty
+# Plot 1: Problem Distribution by Complexity Level (Pie Chart)
+complexity_labels = ['Level 1 (Easiest)', 'Level 2', 'Level 3', 'Level 4', 'Level 5 (Hardest)']
+complexity_values = deepseek_data['difficulty_problems']  # [95, 119, 119, 95, 48]
+complexity_colors = ['#87CEEB', '#4682B4', '#1E90FF', '#0000CD', '#191970']  # Light to dark blue gradient
+
+fig.add_trace(
+    go.Pie(
+        labels=complexity_labels,
+        values=complexity_values,
+        hole=0.3,  # Create a donut chart
+        marker=dict(colors=complexity_colors, line=dict(color='white', width=2)),
+        textinfo='label+percent+value',
+        textfont=dict(size=11),
+        textposition='outside',
+        showlegend=True,
+        name="Problem Distribution"
+    ),
+    row=1, col=1
+)
+
+# Plot 2: Baseline Accuracy by Difficulty
 deepseek_diff_acc = [calculate_accuracy(deepseek_data['difficulty_correct'][i], deepseek_data['difficulty_problems'][i]) 
                      for i in range(len(deepseek_data['difficulty_levels']))]
 qwen_diff_acc = [calculate_accuracy(qwen_data['difficulty_correct'][i], qwen_data['difficulty_problems'][i]) 
@@ -108,17 +130,17 @@ fig.add_trace(
            marker_color=deepseek_color, showlegend=True,
            text=[f'{val:.1f}%' for val in deepseek_diff_acc],
            textposition='outside'),
-    row=1, col=1
+    row=2, col=1
 )
 fig.add_trace(
     go.Bar(name='Qwen3-14B', x=qwen_data['difficulty_levels'], y=qwen_diff_acc, 
            marker_color=qwen_color, showlegend=True,
            text=[f'{val:.1f}%' for val in qwen_diff_acc],
            textposition='outside'),
-    row=1, col=1
+    row=2, col=1
 )
 
-# Plot 2: Baseline Accuracy by Subject
+# Plot 3: Baseline Accuracy by Subject
 deepseek_subj_acc = [calculate_accuracy(deepseek_data['subject_correct'][i], deepseek_data['subject_problems'][i]) 
                      for i in range(len(deepseek_data['subjects']))]
 qwen_subj_acc = [calculate_accuracy(qwen_data['subject_correct'][i], qwen_data['subject_problems'][i]) 
@@ -129,17 +151,17 @@ fig.add_trace(
            marker_color=deepseek_color, showlegend=False,
            text=[f'{val:.1f}%' for val in deepseek_subj_acc],
            textposition='outside'),
-    row=2, col=1
+    row=3, col=1
 )
 fig.add_trace(
     go.Bar(name='Qwen3-14B', x=qwen_data['subjects'], y=qwen_subj_acc, 
            marker_color=qwen_color, showlegend=False,
            text=[f'{val:.1f}%' for val in qwen_subj_acc],
            textposition='outside'),
-    row=2, col=1
+    row=3, col=1
 )
 
-# Plot 3: Intervention Success by Difficulty
+# Plot 4: Intervention Success by Difficulty
 deepseek_int_diff = [calculate_accuracy(deepseek_data['intervention_by_difficulty'][d]['corrected'], 
                                        deepseek_data['intervention_by_difficulty'][d]['attempted']) 
                      for d in deepseek_data['difficulty_levels']]
@@ -152,17 +174,17 @@ fig.add_trace(
            marker_color=deepseek_color, showlegend=False,
            text=[f'{val:.1f}%' for val in deepseek_int_diff],
            textposition='outside'),
-    row=3, col=1
+    row=4, col=1
 )
 fig.add_trace(
     go.Bar(name='Qwen3-14B', x=qwen_data['difficulty_levels'], y=qwen_int_diff, 
            marker_color=qwen_color, showlegend=False,
            text=[f'{val:.1f}%' for val in qwen_int_diff],
            textposition='outside'),
-    row=3, col=1
+    row=4, col=1
 )
 
-# Plot 4: Intervention Success by Subject
+# Plot 5: Intervention Success by Subject
 deepseek_int_subj = [calculate_accuracy(deepseek_data['intervention_by_subject'][s]['corrected'], 
                                        deepseek_data['intervention_by_subject'][s]['attempted']) 
                      for s in deepseek_data['subjects']]
@@ -175,17 +197,17 @@ fig.add_trace(
            marker_color=deepseek_color, showlegend=False,
            text=[f'{val:.1f}%' for val in deepseek_int_subj],
            textposition='outside'),
-    row=4, col=1
+    row=5, col=1
 )
 fig.add_trace(
     go.Bar(name='Qwen3-14B', x=qwen_data['subjects'], y=qwen_int_subj, 
            marker_color=qwen_color, showlegend=False,
            text=[f'{val:.1f}%' for val in qwen_int_subj],
            textposition='outside'),
-    row=4, col=1
+    row=5, col=1
 )
 
-# Plot 5: Cumulative Performance by Difficulty (Baseline + Corrections)
+# Plot 6: Cumulative Performance by Difficulty (Baseline + Corrections)
 def calculate_cumulative_performance(baseline_correct, baseline_total, intervention_corrected, intervention_attempted):
     """Calculate cumulative performance: baseline correct + intervention corrections"""
     baseline_incorrect = baseline_total - baseline_correct
@@ -227,14 +249,14 @@ fig.add_trace(
            marker_color='rgba(46, 139, 87, 0.7)', showlegend=True,
            text=[f'{val:.1f}%' for val in deepseek_diff_acc],
            textposition='inside'),
-    row=5, col=1
+    row=6, col=1
 )
 fig.add_trace(
     go.Bar(name='DeepSeek Intervention Gain', x=deepseek_data['difficulty_levels'], y=deepseek_intervention_gains, 
            marker_color='rgba(34, 102, 64, 1.0)', showlegend=True,
            text=[f'+{val:.1f}%' for val in deepseek_intervention_gains],
            textposition='inside'),
-    row=5, col=1
+    row=6, col=1
 )
 
 # Qwen stacked bars
@@ -243,17 +265,17 @@ fig.add_trace(
            marker_color='rgba(65, 105, 225, 0.7)', showlegend=True,
            text=[f'{val:.1f}%' for val in qwen_diff_acc],
            textposition='inside'),
-    row=5, col=1
+    row=6, col=1
 )
 fig.add_trace(
     go.Bar(name='Qwen Intervention Gain', x=qwen_data['difficulty_levels'], y=qwen_intervention_gains, 
            marker_color='rgba(32, 74, 135, 1.0)', showlegend=True,
            text=[f'+{val:.1f}%' for val in qwen_intervention_gains],
            textposition='inside'),
-    row=5, col=1
+    row=6, col=1
 )
 
-# Plot 6: Cumulative Performance by Subject
+# Plot 7: Cumulative Performance by Subject
 deepseek_cumulative_subj = []
 qwen_cumulative_subj = []
 
@@ -287,14 +309,14 @@ fig.add_trace(
            marker_color='rgba(46, 139, 87, 0.7)', showlegend=False,
            text=[f'{val:.1f}%' for val in deepseek_subj_acc],
            textposition='inside'),
-    row=6, col=1
+    row=7, col=1
 )
 fig.add_trace(
     go.Bar(name='DeepSeek Intervention Gain', x=deepseek_data['subjects'], y=deepseek_intervention_gains_subj, 
            marker_color='rgba(34, 102, 64, 1.0)', showlegend=False,
            text=[f'+{val:.1f}%' for val in deepseek_intervention_gains_subj],
            textposition='inside'),
-    row=6, col=1
+    row=7, col=1
 )
 
 # Qwen stacked bars
@@ -303,17 +325,17 @@ fig.add_trace(
            marker_color='rgba(65, 105, 225, 0.7)', showlegend=False,
            text=[f'{val:.1f}%' for val in qwen_subj_acc],
            textposition='inside'),
-    row=6, col=1
+    row=7, col=1
 )
 fig.add_trace(
     go.Bar(name='Qwen Intervention Gain', x=qwen_data['subjects'], y=qwen_intervention_gains_subj, 
            marker_color='rgba(32, 74, 135, 1.0)', showlegend=False,
            text=[f'+{val:.1f}%' for val in qwen_intervention_gains_subj],
            textposition='inside'),
-    row=6, col=1
+    row=7, col=1
 )
 
-# Plot 7: Baseline vs Intervention Performance Relationship
+# Plot 8: Baseline vs Intervention Performance Relationship
 # Combine all data points for regression analysis
 baseline_values = []
 intervention_values = []
@@ -372,7 +394,7 @@ fig.add_trace(
         textposition='top center',
         showlegend=True
     ),
-    row=7, col=1
+    row=8, col=1
 )
 
 fig.add_trace(
@@ -386,7 +408,7 @@ fig.add_trace(
         textposition='top center',
         showlegend=True
     ),
-    row=7, col=1
+    row=8, col=1
 )
 
 # Add regression line
@@ -399,14 +421,14 @@ fig.add_trace(
         line=dict(color='red', width=2, dash='dash'),
         showlegend=True
     ),
-    row=7, col=1
+    row=8, col=1
 )
 
 # Add regression equation as annotation
 equation_text = f"y = {slope:.3f}x + {intercept:.3f}<br>R² = {r_value**2:.3f}, p = {p_value:.3f}"
 fig.add_annotation(
     text=equation_text,
-    xref="x7", yref="y7",
+    xref="x8", yref="y8",
     x=max(baseline_np) * 0.05,
     y=max(intervention_np) * 0.9,
     showarrow=False,
@@ -419,7 +441,7 @@ fig.add_annotation(
 # Update layout with stacked bars and reduced width
 fig.update_layout(
     width=600,  # Reduced width by 50% (from default ~1200 to 600)
-    height=2800,  # Increased height for 7 plots
+    height=2400,  # Increased height to accommodate pie chart
     title_text="Mathematical Reasoning Performance Analysis: Baseline vs Intervention + Regression Analysis",
     title_x=0.5,
     showlegend=True,
@@ -436,21 +458,21 @@ fig.update_layout(
 )
 
 # Update x and y axes
-fig.update_xaxes(title_text="Difficulty Level", row=1, col=1)
-fig.update_xaxes(title_text="Problem Type", row=2, col=1, tickangle=45)
-fig.update_xaxes(title_text="Difficulty Level", row=3, col=1)
-fig.update_xaxes(title_text="Problem Type", row=4, col=1, tickangle=45)
-fig.update_xaxes(title_text="Difficulty Level", row=5, col=1)
-fig.update_xaxes(title_text="Problem Type", row=6, col=1, tickangle=45)
-fig.update_xaxes(title_text="Baseline Performance (%)", row=7, col=1)
+fig.update_xaxes(title_text="Difficulty Level", row=2, col=1)
+fig.update_xaxes(title_text="Problem Type", row=3, col=1, tickangle=45)
+fig.update_xaxes(title_text="Difficulty Level", row=4, col=1)
+fig.update_xaxes(title_text="Problem Type", row=5, col=1, tickangle=45)
+fig.update_xaxes(title_text="Difficulty Level", row=6, col=1)
+fig.update_xaxes(title_text="Problem Type", row=7, col=1, tickangle=45)
+fig.update_xaxes(title_text="Baseline Performance (%)", row=8, col=1)
 
-fig.update_yaxes(title_text="Accuracy (%)", row=1, col=1, range=[0, 110])
 fig.update_yaxes(title_text="Accuracy (%)", row=2, col=1, range=[0, 110])
-fig.update_yaxes(title_text="Success Rate (%)", row=3, col=1, range=[0, 110])
+fig.update_yaxes(title_text="Accuracy (%)", row=3, col=1, range=[0, 110])
 fig.update_yaxes(title_text="Success Rate (%)", row=4, col=1, range=[0, 110])
-fig.update_yaxes(title_text="Cumulative Accuracy (%)", row=5, col=1, range=[0, 110])
+fig.update_yaxes(title_text="Success Rate (%)", row=5, col=1, range=[0, 110])
 fig.update_yaxes(title_text="Cumulative Accuracy (%)", row=6, col=1, range=[0, 110])
-fig.update_yaxes(title_text="Intervention Success Rate (%)", row=7, col=1)
+fig.update_yaxes(title_text="Cumulative Accuracy (%)", row=7, col=1, range=[0, 110])
+fig.update_yaxes(title_text="Intervention Success Rate (%)", row=8, col=1)
 
 # Add annotations with key statistics
 fig.add_annotation(
