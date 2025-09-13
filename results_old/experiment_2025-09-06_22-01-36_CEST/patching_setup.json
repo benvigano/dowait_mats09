@@ -1,0 +1,15 @@
+[
+  {
+    "timestamp": "2025-09-06 22:01:51 CEST",
+    "selected_problem_id": 8,
+    "corrective_condition_used": "Corrective_Original",
+    "source_prompt": "Reason step by step:\n\nLet the four integers be $a < b < c < d$.\nWhen we add $a$ and $b$, we get 10.\nWhen we add $a$ and $c$, we get 18.\nWhen we add $a$ and $d$, we get 19.\nWhen we add $b$ and $c$, we get 20.\nWhen we add $b$ and $d$, we get 21.\nWhen we add $c$ and $d$, we get 29.\n\nWe can write these equations as:\n$a + b = 10$\n$a + c = 18$\n$a + d = 19$\n$b + c = 20$\n$b + d = 21$\n$c + d = 29$\n\nAdding all six equations, we get:\n$(a + b) + (a + c) + (a + d) + (b + c) + (b + d) + (c + d) = 10 + 18 + 19 + 20 + 21 + 29$\n$4a + 4b + 4c + 4d = 116$\n$4(a + b + c + d) = 116$\n$a + b + c + d = 29$\n\nNow, we can solve for each variable:\n$a + b = 10$\n$a + c = 18$\n$a + d = 19$\n$b + c = 20$\n$b + d = 21$\n$c + d = 29$\n\nAdding the equations for $a$ and $b$, we get:\n$2a + 2b = 28$\n Wait. ",
+    "destination_prompt": "Reason step by step:\n\nLet the four integers be $a < b < c < d$.\nWhen we add $a$ and $b$, we get 10.\nWhen we add $a$ and $c$, we get 18.\nWhen we add $a$ and $d$, we get 19.\nWhen we add $b$ and $c$, we get 20.\nWhen we add $b$ and $d$, we get 21.\nWhen we add $c$ and $d$, we get 29.\n\nWe can write these equations as:\n$a + b = 10$\n$a + c = 18$\n$a + d = 19$\n$b + c = 20$\n$b + d = 21$\n$c + d = 29$\n\nAdding all six equations, we get:\n$(a + b) + (a + c) + (a + d) + (b + c) + (b + d) + (c + d) = 10 + 18 + 19 + 20 + 21 + 29$\n$4a + 4b + 4c + 4d = 116$\n$4(a + b + c + d) = 116$\n$a + b + c + d = 29$\n\nNow, we can solve for each variable:\n$a + b = 10$\n$a + c = 18$\n$a + d = 19$\n$b + c = 20$\n$b + d = 21$\n$c + d = 29$\n\nAdding the equations for $a$ and $b$, we get:\n$2a + 2b = 28$\n",
+    "source_answer_tokens": "4, 6, 14, 15",
+    "destination_answer_tokens": "5, 14, 15, 19",
+    "methodology": "Activation patching: corrected intervention vs original uninformed continuation",
+    "comparison_type": "clean_corrected_vs_corrupted_original",
+    "patching_position": "last_token",
+    "components_tested": "all_attention_heads_and_mlp_layers"
+  }
+]

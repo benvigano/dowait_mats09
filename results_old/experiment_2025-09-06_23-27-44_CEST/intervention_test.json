@@ -1,0 +1,18 @@
+[
+  {
+    "problem_id": 5,
+    "problem": "What is the 100th term of the arithmetic sequence 6, 10, 14, 18, ...?",
+    "ground_truth_answer": "402",
+    "condition": "Corrective_Original",
+    "intervened_cot": " ... (empty line)\n\nWait again.\n</think>\n\nThe solution to the problem is:\n\n\\[\n\\boxed{\\text{Please provide more details or clarify your request.}}\n\\]",
+    "intervened_answer": "\\text{Please provide more details or clarify your request.}",
+    "is_corrected": false,
+    "error": "",
+    "mistake_sentence": "The common difference is 6 - 10 = −4. So, a_1 = 6, d = −4.",
+    "truncation_point": 1,
+    "intervention_phrase": " Wait. ",
+    "original_cot_length": 878,
+    "truncated_cot_length": 1,
+    "final_prompt": "  Wait. "
+  }
+]

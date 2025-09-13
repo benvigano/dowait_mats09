@@ -1,0 +1,23 @@
+STEERING VECTOR EXPERIMENT SUMMARY
+==================================================
+
+Layer used: 21
+Training problems: 65
+Validation problems: 4
+Success rate: 0.0%
+Successful corrections: 0
+
+VALIDATION RESULTS:
+------------------------------
+Problem 459: ✗
+  Error at line 60.0: How to proceed? Well, normally, convoluting two quadratics involves distributing each term across th...
+
+Problem 450: ✗
+  Error at line 80.0: The value of \( Q \cdot E \cdot D \) is \(\boxed{292}\)....
+
+Problem 226: ✗
+  Error at line 292.0: Row1: C1=4, C2=3, C3=8 --> Sum=4+3+8=15...
+
+Problem 312: ✗
+  Error at line 77.0: Computing First Derivative:...
+

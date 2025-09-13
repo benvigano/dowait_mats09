@@ -1,3 +1,4 @@
+
 # %%
 # --- 1. Setup and Imports ---
 from dotenv import load_dotenv
@@ -5,12 +6,36 @@ from importlib import reload
 import torch
 from datasets import load_dataset
 import pandas as pd
-from tqdm.auto import tqdm
 from IPython.display import display
 import plotly.express as px
 import os
 
-# Import our custom module
+# ============================================================
+# EXPERIMENT CONFIGURATION & CONSTANTS
+# ============================================================
+
+# Model Configuration
+MODELS_TO_TEST = [
+    {"type": "huggingface", "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"},
+    {"type": "nebius", "id": "Qwen/Qwen3-14B"}
+]
+
+# Experiment Parameters
+DEBUG_MODE = False
+SAMPLE_SIZE = 10  # Number of examples to use in debug mode
+PROD_SAMPLE_SIZE = 500  # Limit the number of examples for the full run
+GENERALIZATION_SAMPLE_SIZE = 2  # Max incorrect problems to test for generalization. Set to None to use all.
+MAX_STEERING_VALIDATION_SAMPLES = 1  # Max validation samples for steering experiment (None for no limit)
+
+# Removed: Steering & Activation Patching functionality
+
+# Current experiment: Only testing the original "Wait" intervention
+CURRENT_INTERVENTIONS = {
+    "Corrective_Original": "\nWait! ",
+    "Corrective_Strong": " Wait, I made a mistake. ",
+}
+
+# Import our custom modules
 import core
 reload(core)
 
@@ -18,243 +43,249 @@ reload(core)
 load_dotenv()
 core.print_timestamped_message("Environment variables loaded. Script starting.")
 
-# Define the path for our results file
-RESULTS_DIR = "results"
-os.makedirs(RESULTS_DIR, exist_ok=True)
-EXCEL_RESULTS_PATH = os.path.join(RESULTS_DIR, f"experiment_results_{core.get_timestamp_in_rome().replace(' ', '_').replace(':', '-')}.xlsx")
-core.print_timestamped_message(f"Results will be saved to: {EXCEL_RESULTS_PATH}")
+# Define the path for our results folder
+RESULTS_BASE_DIR = "results"
+os.makedirs(RESULTS_BASE_DIR, exist_ok=True)
+EXPERIMENT_RESULTS_DIR = os.path.join(RESULTS_BASE_DIR, f"experiment_{core.get_timestamp_in_rome().replace(' ', '_').replace(':', '-')}")
+os.makedirs(EXPERIMENT_RESULTS_DIR, exist_ok=True)
+core.print_timestamped_message(f"Results will be saved to: {EXPERIMENT_RESULTS_DIR}")
 
 
 # %%
 # ============================================================
-# PHASE 1: SETUP (MODEL, TOKENIZER, DATASET)
+# PHASE 1: PROBLEM SELECTION (NEW: DIVERSE PROBLEMS FIRST!)
 # ============================================================
 
-# --- 2. Load Model and Tokenizer ---
-# Load HuggingFace model for generation
-model, tokenizer = core.load_model_and_tokenizer()
-core.print_timestamped_message("✅ HuggingFace model and tokenizer loaded")
-
-# --- 3. Load Dataset ---
-core.print_timestamped_message("Loading dataset...")
-full_dataset = load_dataset("EleutherAI/hendrycks_math", "algebra", split='test')
-
-# In debug mode, we'll use a small, deterministic sample. Otherwise, use the full dataset.
-if core.DEBUG_MODE:
-    core.print_timestamped_message(f"--- DEBUG MODE: Using a sample of {core.SAMPLE_SIZE} examples ---")
-    dataset = full_dataset.select(range(core.SAMPLE_SIZE))
-else:
-    core.print_timestamped_message(f"--- PRODUCTION MODE: Limiting to {core.PROD_SAMPLE_SIZE} examples ---")
-    dataset = full_dataset.select(range(core.PROD_SAMPLE_SIZE))
-
-display(dataset)
-core.print_timestamped_message("Dataset loaded.")
-
-# %%
-# ============================================================
-# PHASE 1: BASELINE EXPERIMENT
-# ============================================================
-core.print_timestamped_message("=" * 60)
-core.print_timestamped_message("🎯 STARTING BASELINE EXPERIMENT")
-core.print_timestamped_message("=" * 60)
-
-results_df = core.run_baseline_experiment(dataset, model, tokenizer, EXCEL_RESULTS_PATH)
-core.print_timestamped_message(f"✅ Baseline experiment completed: {len(results_df)} problems processed")
-
-
-# %%
-# ============================================================
-# PHASE 2: ERROR IDENTIFICATION  
-# ============================================================
 core.print_timestamped_message("")
 core.print_timestamped_message("=" * 60)
-core.print_timestamped_message("🔍 STARTING ERROR IDENTIFICATION")
+core.print_timestamped_message("🎲 SELECTING DIVERSE PROBLEMS")
 core.print_timestamped_message("=" * 60)
 
-error_analysis_df = core.identify_errors(results_df, EXCEL_RESULTS_PATH, tokenizer=tokenizer, use_token_indexing=True)
-if not error_analysis_df.empty:
-    core.print_timestamped_message(f"✅ Error identification completed: {len(error_analysis_df)} problems analyzed")
+# NEW: Select diverse problems from all subjects and difficulty levels
+# Higher levels get more weight since they're more challenging and interesting
+selected_problems = core.select_diverse_problems(PROD_SAMPLE_SIZE, DEBUG_MODE)
 
+core.print_timestamped_message(f"📊 Selected {len(selected_problems)} problems for experiment")
 
 # %%
+# ============================================================  
+# PHASE 2: MULTI-MODEL EXPERIMENT LOOP
 # ============================================================
-# PHASE 3: INTERVENTION TESTING
-# ============================================================
-core.print_timestamped_message("")
-core.print_timestamped_message("=" * 60)
-core.print_timestamped_message("💉 STARTING INTERVENTION TESTING")
-core.print_timestamped_message("=" * 60)
 
-# Use intervention phrases from core constants
-intervention_phrases = core.CURRENT_INTERVENTIONS
-
-intervention_df = core.run_insertion_test(error_analysis_df, model, tokenizer, intervention_phrases, EXCEL_RESULTS_PATH)
-if not intervention_df.empty:
-    core.print_timestamped_message(f"✅ Intervention testing completed: {len(intervention_df)} interventions tested")
-
-
-# %%
-# --- 6.5. DEBUG: Ensure Patching Candidate ---
-# In debug mode, we want to guarantee that the activation patching step runs.
-# This block checks if a suitable clean/corrupted pair was found. If not,
-# it injects a mock example to ensure the patching logic can be tested.
-if core.DEBUG_MODE:
-    core.print_timestamped_message("--- DEBUG: Checking for activation patching candidate ---")
+# Convert selected problems to dataset-like format for compatibility
+class ProblemDataset:
+    def __init__(self, problems):
+        self.problems = problems
     
-    candidate_found = False
+    def __len__(self):
+        return len(self.problems)
+    
+    def __getitem__(self, idx):
+        return self.problems[idx]
+
+dataset = ProblemDataset(selected_problems)
+
+# Store results for comparison
+all_model_results = {}
+all_patching_results = {}
+
+for model_config in MODELS_TO_TEST:
+    model_type = model_config["type"]
+    model_id = model_config["id"]
+    
+    core.print_timestamped_message("")
+    core.print_timestamped_message("=" * 80)
+    core.print_timestamped_message(f"🚀 STARTING EXPERIMENTS FOR MODEL: {model_id} ({model_type})")
+    core.print_timestamped_message("=" * 80)
+    
+    # Create model-specific results directory
+    model_name = model_id.replace("/", "_").replace("-", "_")
+    model_results_dir = os.path.join(EXPERIMENT_RESULTS_DIR, f"model_{model_name}")
+    os.makedirs(model_results_dir, exist_ok=True)
+    
+    # ============================================================
+    # PHASE 2A: SETUP (MODEL, TOKENIZER)
+    # ============================================================
+    core.print_timestamped_message(f"Loading model: {model_id} via {model_type}")
+    from models import create_model
+    model = create_model(model_type, model_id)
+    core.print_timestamped_message(f"✅ {model_type.title()} model loaded")
+
+    # ============================================================
+    # PHASE 2B: BASELINE EXPERIMENT  
+    # ============================================================
+    core.print_timestamped_message("")
+    core.print_timestamped_message("=" * 60)
+    core.print_timestamped_message("🎯 STARTING BASELINE EXPERIMENT")
+    core.print_timestamped_message("=" * 60)
+
+    results_df = core.run_baseline_experiment(dataset, model, None, model_results_dir, model.get_model_id())
+    core.print_timestamped_message(f"✅ Baseline experiment completed: {len(results_df)} problems processed")
+
+    # Print database summary
+    from database import print_database_summary
+    print_database_summary(model_results_dir)
+
+    # ============================================================
+    # PHASE 2C: INTERVENTION TESTING
+    # ============================================================
+    core.print_timestamped_message("")
+    core.print_timestamped_message("=" * 60)
+    core.print_timestamped_message("💉 STARTING INTERVENTION TESTING")
+    core.print_timestamped_message("=" * 60)
+
+    # Use intervention phrases from local constants
+    intervention_phrases = CURRENT_INTERVENTIONS
+
+    intervention_df = core.run_insertion_test(results_df, model, intervention_phrases, model_results_dir)
     if not intervention_df.empty:
-        # We need to pivot to check conditions for the same problem
-        try:
-            pivot_df_check = intervention_df.pivot(index='problem', columns='condition', values='is_corrected')
-            corrective_cols_check = [col for col in pivot_df_check.columns if col.startswith('Corrective')]
+        core.print_timestamped_message(f"✅ Intervention testing completed: {len(intervention_df)} interventions tested")
+
+    # Print updated database summary
+    print_database_summary(model_results_dir)
+
+    # ============================================================
+    # PHASE 2D: ACTIVATION PATCHING (CAUSAL TRACING)
+    # ============================================================
+    core.print_timestamped_message("")
+    core.print_timestamped_message("=" * 60)
+    core.print_timestamped_message("🔍 STARTING ACTIVATION PATCHING")
+    core.print_timestamped_message("=" * 60)
+
+    # --- Define Patching Setup Using Real Problems ---
+    # We'll use intervention data to create realistic clean/corrupted pairs
+    patching_setup = {
+        "use_intervention_data": True,
+        "intervention_df": intervention_df,
+        "patching_components": ["resid_pre", "attn_out", "mlp_out", "z"],
+        "max_problems_to_patch": 5  # Limit for computational efficiency
+    }
+
+    # --- Run Activation Patching Experiment ---
+    # Only run activation patching for HuggingFace models (TransformerLens requirement)
+    if model_type == "huggingface":
+        from high_level import run_activation_patching_experiment
+        patching_results, patching_fig = run_activation_patching_experiment(
+            model, patching_setup, model_results_dir
+        )
+
+        if patching_results:
+            core.print_timestamped_message("Activation patching completed and saved to results directory.")
             
-            if corrective_cols_check:
-                for col in corrective_cols_check:
-                    # A candidate is any problem where a corrective intervention worked
-                    if not pivot_df_check[pivot_df_check[col] == True].empty:
-                        candidate_found = True
-                        core.print_timestamped_message("--- DEBUG: A valid patching candidate already exists. No mock data needed. ---")
-                        break
-        except Exception as e:
-            core.print_timestamped_message(f"--- DEBUG: Could not pivot intervention_df to check for candidates, likely due to duplicate entries. Error: {e} ---")
+            # Store results for comparison
+            all_patching_results[model_id] = patching_results
+            
+            # Print summary statistics for each component
+            for component, data in patching_results.items():
+                import numpy as np
+                data_array = np.array(data)
+                max_recovery = np.max(data_array)
+                mean_recovery = np.mean(data_array)
+                core.print_timestamped_message(f"  {component}: Max recovery = {max_recovery:.3f}, Mean recovery = {mean_recovery:.3f}")
+                
+                # Find the location with maximum recovery
+                max_pos = np.unravel_index(np.argmax(data_array), data_array.shape)
+                if component == "z" and len(data_array.shape) == 3:
+                    core.print_timestamped_message(f"    Max recovery at Layer {max_pos[0]}, Head {max_pos[1]}, Position {max_pos[2]}")
+                else:
+                    core.print_timestamped_message(f"    Max recovery at Layer {max_pos[0]}, Position {max_pos[1]}")
+    else:
+        core.print_timestamped_message("⚠️ Activation patching skipped for API-based models (TransformerLens not supported)")
+        patching_results = None
 
-
-    if not candidate_found:
-        core.print_timestamped_message("--- DEBUG: No valid candidate found. Injecting mock data to ensure patching runs. ---")
+    # ============================================================
+    # PHASE 2E: STEERING VECTOR EXPERIMENT
+    # ============================================================
+    steering_df = None
+    if model_type == "huggingface" and not intervention_df.empty:
+        core.print_timestamped_message("")
+        core.print_timestamped_message("=" * 60)
+        core.print_timestamped_message("🎯 STARTING STEERING VECTOR EXPERIMENT")
+        core.print_timestamped_message("=" * 60)
         
-        mock_problem_text = "This is a mock problem for testing activation patching. What is 2+2?"
-        
-        # Create a mock row for the error_analysis_df. It needs to contain all the columns
-        # that the patching setup step will try to access.
-        mock_error_row = pd.DataFrame([{
-            'problem': mock_problem_text,
-            'full_generated_solution': "I will calculate 2+2. The result is 5.",
-            'error_sentence': "The result is 5.",
-            'problem_id': 999,
-            'ground_truth_full': 'The answer is \\boxed{4}',
-            'is_correct': False,
-            'ground_truth_answer': '4',
-            'generated_answer': '5',
-            'error': None,
-            'error_identification_error': None
-        }])
-        
-        # Create mock rows for the intervention_df to create the clean/corrupted pair.
-        mock_intervention_rows = pd.DataFrame([
-            {
-                'problem': mock_problem_text,
-                'condition': 'Corrective_Original',
-                'is_corrected': True, # This is the "clean" run that worked
-                'intervened_cot': "I will calculate 2+2. Wait, let me re-evaluate that. The correct answer is 4. \\boxed{4}.",
-                'intervened_answer': '4',
-                'problem_id': 999,
-                'error': None
-            }
-        ])
-
-        # Safely append the mock data. `pd.concat` is the modern way.
-        if not error_analysis_df.empty:
-            error_analysis_df = pd.concat([error_analysis_df, mock_error_row], ignore_index=True)
-        else:
-            error_analysis_df = mock_error_row
-
-        if not intervention_df.empty:
-            intervention_df = pd.concat([intervention_df, mock_intervention_rows], ignore_index=True)
-        else:
-             intervention_df = mock_intervention_rows
-        
-        core.print_timestamped_message("--- DEBUG: Mock data injected successfully. ---")
-
-
-# %%
-# --- 7. Activation Patching Setup ---
-# We now prepare for the main causal analysis. We need to find a 'clean' run (where our 
-# 'Corrective' intervention worked) and a 'corrupted' run (where the original uninformed 
-# continuation failed on the same problem).
-
-# %%
-# ============================================================
-# PHASE 4: ACTIVATION PATCHING ANALYSIS
-# ============================================================
-# Load TransformerLens model for activation patching
-tl_model = core.load_tl_model(model)
-core.print_timestamped_message("Setting up activation patching experiment...")
-
-if not intervention_df.empty:
-    pivot_df = intervention_df.pivot(index='problem', columns='condition', values='is_corrected')
-    
-    # Look for any corrective condition that successfully fixed the error
-    corrective_cols = [col for col in pivot_df.columns if col.startswith('Corrective')]
-    
-    successful_candidates = pd.DataFrame()
-    best_corrective_condition = None
-    
-    if corrective_cols:
-        # Find any problem where a Corrective intervention succeeded
-        for corrective_col in corrective_cols:
-            candidates = pivot_df[pivot_df[corrective_col] == True]
-            if not candidates.empty:
-                successful_candidates = candidates
-                best_corrective_condition = corrective_col
-                core.print_timestamped_message(f"Found {len(candidates)} candidates with {corrective_col}")
-                break
-
-    if not successful_candidates.empty:
-        target_problem = successful_candidates.index[0]
-        core.print_timestamped_message(f"Found a perfect candidate for patching: {target_problem[:80]}...")
-        
-        # Reconstruct prompts from our data
-        analyzable_row = error_analysis_df[error_analysis_df['problem'] == target_problem].iloc[0]
-        original_cot = analyzable_row['full_generated_solution']
-        mistake_sentence = analyzable_row['mistake_sentence']
-        mistake_index = original_cot.find(mistake_sentence)
-        truncated_cot = original_cot[:mistake_index]
-
-        # Define source (clean) and destination (corrupted) prompts
-        source_prompt = truncated_cot + intervention_phrases[best_corrective_condition]
-        destination_prompt = truncated_cot  # Original uninformed continuation
-
-        source_full_cot = intervention_df[(intervention_df['problem'] == target_problem) & (intervention_df['condition'] == best_corrective_condition)].iloc[0]['intervened_cot']
-        destination_full_cot = original_cot
-
-        core.print_timestamped_message(f"Using corrective condition: {best_corrective_condition}")
-        core.print_timestamped_message("Comparing corrected intervention vs. original uninformed continuation")
-
-        # Define correct and incorrect answers for logit diff calculation
-        source_answer_text = core.extract_boxed_answer(source_full_cot)
-        destination_answer_text = core.extract_boxed_answer(destination_full_cot)
-
-        # --- 8. Run Activation Patching ---
-        patching_results_df = core.get_patching_results(
-            tl_model, 
-            source_prompt, 
-            destination_prompt,
-            source_answer_text,
-            destination_answer_text,
-            excel_path=EXCEL_RESULTS_PATH,
-            problem_id=analyzable_row['problem_id'],
-            corrective_condition=best_corrective_condition
+        from high_level import run_steering_experiment
+        steering_df = run_steering_experiment(
+            model, results_df, intervention_df, intervention_phrases, model_results_dir, 
+            layer=21, max_validation_samples=MAX_STEERING_VALIDATION_SAMPLES
         )
         
-        # --- 9. Visualize Results ---
-        if not patching_results_df.empty:
-            # Separate attention and MLP data for visualization
-            attention_results = patching_results_df[patching_results_df['component'].str.contains('Head')]
-            mlp_results = patching_results_df[patching_results_df['component'] == 'MLP']
+        if steering_df is not None and not steering_df.empty:
+            steering_success = (steering_df['is_corrected_by_steering'].sum() / len(steering_df)) * 100
+            core.print_timestamped_message(f"✅ Steering experiment completed: {steering_success:.1f}% success rate")
+        else:
+            core.print_timestamped_message("⚠️ Steering experiment could not be completed")
+    else:
+        core.print_timestamped_message("⚠️ Steering experiment skipped (API model or no interventions)")
 
-            # Summarize Attention Heads results
-            if not attention_results.empty:
-                print(f"Attention heads results: {len(attention_results)} components analyzed")
-                print(f"Top 5 attention heads by logit diff change:")
-                top_attn = attention_results.nlargest(5, 'logit_diff_change')[['layer', 'component', 'logit_diff_change']]
-                print(top_attn.to_string(index=False))
+    # Store model results
+    all_model_results[model_id] = {
+        'model_type': model_type,
+        'baseline_accuracy': (results_df['is_correct'].sum() / len(results_df)) * 100 if not results_df.empty else 0,
+        'intervention_success': (intervention_df['is_corrected'].sum() / len(intervention_df)) * 100 if not intervention_df.empty else 0,
+        'patching_results': patching_results,
+        'steering_success': (steering_df['is_corrected_by_steering'].sum() / len(steering_df)) * 100 if steering_df is not None and not steering_df.empty else None
+    }
+    
+    # Clean up model from memory before loading next one
+    from models import drop_model_from_memory
+    model = drop_model_from_memory(model)
 
-            # Summarize MLP Layers results
-            if not mlp_results.empty:
-                print(f"\nMLP layers results: {len(mlp_results)} layers analyzed")
-                print(f"Top 5 MLP layers by logit diff change:")
-                top_mlp = mlp_results.nlargest(5, 'logit_diff_change')[['layer', 'component', 'logit_diff_change']]
-                print(top_mlp.to_string(index=False))
+# ============================================================
+# PHASE 3: CROSS-MODEL COMPARISON
+# ============================================================
+core.print_timestamped_message("")
+core.print_timestamped_message("=" * 80)
+core.print_timestamped_message("📊 CROSS-MODEL COMPARISON SUMMARY")
+core.print_timestamped_message("=" * 80)
+
+for model_id, results in all_model_results.items():
+    core.print_timestamped_message(f"\n{model_id} ({results['model_type']}):")
+    core.print_timestamped_message(f"  Baseline Accuracy: {results['baseline_accuracy']:.1f}%")
+    core.print_timestamped_message(f"  Intervention Success: {results['intervention_success']:.1f}%")
+    
+    if results['patching_results']:
+        for component, data in results['patching_results'].items():
+            import numpy as np
+            max_recovery = np.max(np.array(data))
+            core.print_timestamped_message(f"  {component} Max Recovery: {max_recovery:.3f}")
+    else:
+        core.print_timestamped_message(f"  Activation Patching: Not available (API model)")
+    
+    if results['steering_success'] is not None:
+        core.print_timestamped_message(f"  Steering Vector Success: {results['steering_success']:.1f}%")
+    else:
+        core.print_timestamped_message(f"  Steering Vector: Not available")
+
+# Save comparison data
+comparison_file = os.path.join(EXPERIMENT_RESULTS_DIR, "model_comparison.json")
+import json
+with open(comparison_file, 'w') as f:
+    # Convert numpy arrays to lists for JSON serialization
+    serializable_results = {}
+    for model_id, results in all_model_results.items():
+        serializable_results[model_id] = {
+            'model_type': results['model_type'],
+            'baseline_accuracy': results['baseline_accuracy'],
+            'intervention_success': results['intervention_success'],
+            'patching_results': {k: v.tolist() if hasattr(v, 'tolist') else v 
+                               for k, v in results['patching_results'].items()} if results['patching_results'] else None,
+            'steering_success': results['steering_success']
+        }
+    json.dump(serializable_results, f, indent=4)
+
+core.print_timestamped_message(f"Cross-model comparison saved to: {comparison_file}")
+
+
+# %%
+# ============================================================
+# EXPERIMENT COMPLETE
+# ============================================================
+core.print_timestamped_message("")
+core.print_timestamped_message("=" * 60)
+core.print_timestamped_message("✅ EXPERIMENT COMPLETE")
+core.print_timestamped_message("=" * 60)
+
+# Print final database summary
+print_database_summary(EXPERIMENT_RESULTS_DIR)
 
 core.print_timestamped_message("Script finished.")
-
