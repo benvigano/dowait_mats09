@@ -9,3 +9,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Results and cache directories
+results/
+cache/
+results_old/
+cache_backup/
+
+# Log files
+*.log

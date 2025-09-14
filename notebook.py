@@ -17,7 +17,7 @@ import os
 # Model Configuration
 MODELS_TO_TEST = [
     #{"type": "huggingface", "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"},
-    {"type": "huggingface", "id": "Qwen/Qwen3-14B"}  # Official Qwen3-14B for steering experiments (FP8 requires newer GPU)
+    {"type": "huggingface", "id": "Qwen/Qwen3-1.7B"}  # Testing with smaller Qwen3-1.7B model
 ]
 
 # Experiment Parameters
@@ -172,7 +172,7 @@ for model_config in MODELS_TO_TEST:
                 steering_df = run_nnsight_steering_experiment(
                     model_interface=model,
                     results_dir=model_results_dir,
-                    layer=20,  # Use layer 20 for Qwen3-14B (optimal for 14B models)
+                    layer=16,  # Use layer 16 for Qwen3-1.7B (28 layers total, middle layer)
                     steering_strength=1.0
                 )
                 
@@ -186,7 +186,7 @@ for model_config in MODELS_TO_TEST:
                     insert_nnsight_steering_result(
                         results_dir=model_results_dir,
                         model_id=model.get_model_id(),
-                        layer=20,
+                        layer=16,
                         steering_strength=1.0,
                         train_pairs_count=len(steering_df),  # This will be corrected in the actual implementation
                         validation_pairs_count=len(steering_df),

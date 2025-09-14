@@ -6,28 +6,22 @@ Uses contrasting pairs of wrong baseline vs successful corrections to build stee
 import torch
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Tuple, Optional
 import json
+import os
+import gc
+from typing import List, Dict, Tuple, Optional
 from cache import print_timestamped_message
-from database import get_experiment_results
 from low_level import evaluate_answer
 
 
 class NNsightSteeringExperiment:
     """
-    Steering vector experiment using nnsight for Qwen3-14B model.
+    Steering vector experiment using nnsight for Qwen3 models.
     Builds vectors that encode the direction "realize you've made a mistake".
     """
     
-    def __init__(self, model_interface, results_dir: str, layer: int = 20):
-        """
-        Initialize steering experiment.
-        
-        Args:
-            model_interface: Model interface that supports nnsight
-            results_dir: Directory containing experiment results
-            layer: Layer to extract activations from and apply steering
-        """
+    def __init__(self, model_interface, results_dir: str, layer: int = 16):
+        """Initialize steering experiment."""
         self.model_interface = model_interface
         self.results_dir = results_dir
         self.layer = layer
@@ -36,393 +30,285 @@ class NNsightSteeringExperiment:
         self.validation_data = []
         
     def extract_contrasting_pairs(self, train_fraction: float = 0.8) -> bool:
-        """
-        Extract contrasting pairs for steering vector creation.
-        
-        Returns:
-            bool: True if sufficient contrasting pairs found
-        """
+        """Extract contrasting pairs for steering vector creation."""
         print_timestamped_message("Extracting contrasting pairs for steering vector...")
         
-        # Get all experiment results from database
-        results = get_experiment_results(self.results_dir)
-        
-        if not results:
-            print_timestamped_message("⚠️ No experiment results found in database")
+        # Load baseline results (wrong answers)
+        baseline_file = os.path.join(self.results_dir, "baseline_results.json")
+        if not os.path.exists(baseline_file):
+            print_timestamped_message("⚠️ No baseline results found")
             return False
+            
+        with open(baseline_file, 'r') as f:
+            baseline_data = json.load(f)
         
-        # Filter for problems with anthropic-labeled wrong baselines and successful interventions
+        # Load intervention results (successful corrections)
+        intervention_file = os.path.join(self.results_dir, "intervention_results.json")
+        if not os.path.exists(intervention_file):
+            print_timestamped_message("⚠️ No intervention results found")
+            return False
+            
+        with open(intervention_file, 'r') as f:
+            intervention_data = json.load(f)
+        
+        # Filter for wrong baseline results that were successfully labeled by Anthropic
+        wrong_baseline = [r for r in baseline_data if not r.get('is_correct', True) and r.get('error_location') is not None]
+        
+        # Filter for successful corrections
+        successful_corrections = [r for r in intervention_data if r.get('is_corrected', False)]
+        
+        if len(wrong_baseline) == 0:
+            print_timestamped_message("⚠️ No wrong baseline results with error locations found")
+            return False
+            
+        if len(successful_corrections) == 0:
+            print_timestamped_message("⚠️ No successful corrections found")
+            return False
+            
+        # Create contrasting pairs by matching problem IDs
         contrasting_pairs = []
-        
-        for result in results:
-            # Must have anthropic-labeled wrong baseline with error location
-            if (result.get('baseline_correct') == 0 and 
-                result.get('baseline_error_line_number') is not None and
-                result.get('baseline_error_line_content') is not None and
-                result.get('baseline_raw_response')):
+        for correction in successful_corrections:
+            problem_id = correction.get('problem_id')
+            if problem_id is None:
+                continue
                 
-                # Must have successful intervention
-                if result.get('intervention_correct') == 1 and result.get('intervention_raw_response'):
-                    
-                    # Extract the moment right after the mistake in baseline
-                    baseline_cot = result['baseline_raw_response']
-                    error_line = result['baseline_error_line_content']
-                    
-                    # Find where the error occurs in the baseline
-                    if error_line in baseline_cot:
-                        error_index = baseline_cot.find(error_line)
-                        error_end = error_index + len(error_line)
-                        
-                        # Extract the baseline continuation after the error (where it should realize the mistake)
-                        baseline_continuation = baseline_cot[error_end:].strip()
-                        
-                        if baseline_continuation:  # Make sure there's content after the error
-                            contrasting_pairs.append({
-                                'problem_id': result.get('problem', 'unknown'),
-                                'problem_text': result.get('problem', ''),
-                                'ground_truth': result.get('ground_truth_answer', ''),
-                                'error_location': error_index + len(error_line),
-                                'baseline_prefix': baseline_cot[:error_end],
-                                'baseline_continuation': baseline_continuation,
-                                'intervention_response': result['intervention_raw_response'],
-                                'error_line': error_line
-                            })
+            # Find corresponding baseline wrong answer
+            baseline_match = next((b for b in wrong_baseline if b.get('problem_id') == problem_id), None)
+            if baseline_match:
+                contrasting_pairs.append({
+                    'problem_id': problem_id,
+                    'wrong_cot': baseline_match['cot_reasoning'],
+                    'correct_cot': correction['cot_reasoning'],
+                    'error_location': baseline_match['error_location'],
+                    'correct_answer': baseline_match.get('correct_answer', ''),
+                    'problem_text': baseline_match.get('problem', '')
+                })
         
-        if len(contrasting_pairs) < 5:
-            print_timestamped_message(f"⚠️ Only found {len(contrasting_pairs)} contrasting pairs. Need at least 5.")
+        if len(contrasting_pairs) < 4:
+            print_timestamped_message(f"⚠️ Only {len(contrasting_pairs)} contrasting pairs found, need at least 4")
             return False
-        
+            
         print_timestamped_message(f"Found {len(contrasting_pairs)} contrasting pairs")
         
-        # Split into train/validation
+        # Split into training and validation
         np.random.seed(42)
         indices = np.random.permutation(len(contrasting_pairs))
         train_size = int(len(contrasting_pairs) * train_fraction)
         
-        self.train_data = [contrasting_pairs[i] for i in indices[:train_size]]
-        self.validation_data = [contrasting_pairs[i] for i in indices[train_size:]]
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+        
+        self.train_data = [contrasting_pairs[i] for i in train_indices]
+        self.validation_data = [contrasting_pairs[i] for i in val_indices]
         
         print_timestamped_message(f"Split into {len(self.train_data)} training and {len(self.validation_data)} validation pairs")
         return True
     
-    def _extract_activations_from_model(self, nnsight_model, prompt: str, target_layer: int) -> torch.Tensor:
-        """
-        Extract activations from a pre-loaded nnsight model with memory management.
-        """
+    def extract_activations(self, prompt: str) -> Optional[np.ndarray]:
+        """Extract activations from prompt using nnsight."""
         try:
-            # Get tokenizer from the model interface
-            if hasattr(self.model_interface, 'tokenizer') and self.model_interface.tokenizer is not None:
-                tokenizer = self.model_interface.tokenizer
-            elif hasattr(self.model_interface, 'hf_tokenizer') and self.model_interface.hf_tokenizer is not None:
-                tokenizer = self.model_interface.hf_tokenizer
-            else:
-                raise ValueError("No tokenizer available")
-            
-            # Tokenize input and move to GPU
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-            input_ids = inputs['input_ids'].to(nnsight_model.device if hasattr(nnsight_model, 'device') else 'cuda')
-            
-            # Clear any cached computations in nnsight
-            if hasattr(nnsight_model, 'reset'):
-                nnsight_model.reset()
-            
-            # Force memory cleanup before tracing
-            import torch
-            import gc
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            with nnsight_model.trace(input_ids):
-                # Extract activations from the specified layer
-                # For Qwen models, get the hidden states output
-                hidden_states = nnsight_model.model.layers[target_layer].output[0]
-                activations = hidden_states.save()
-            
-            # Move to CPU immediately to free GPU memory
-            activations_cpu = activations.detach().cpu()
-            
-            # Handle different activation shapes
-            if len(activations_cpu.shape) == 3:
-                # Expected shape: (batch_size, seq_len, hidden_size)
-                last_token_activations = activations_cpu[:, -1, :]
-            elif len(activations_cpu.shape) == 2:
-                # If shape is (seq_len, hidden_size), take last position
-                last_token_activations = activations_cpu[-1, :].unsqueeze(0)
-            else:
-                print_timestamped_message(f"Unexpected activation shape: {activations_cpu.shape}")
-                return None
-            
-            # Clear GPU memory after each extraction
-            del activations, activations_cpu, input_ids, inputs
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            return last_token_activations
-            
-        except OutOfMemoryError as e:
-            print_timestamped_message(f"OOM during activation extraction: {e}")
-            # Emergency memory cleanup
-            import torch
-            import gc
-            torch.cuda.empty_cache()
-            gc.collect()
-            return None
-        except Exception as e:
-            print_timestamped_message(f"Error extracting activations: {e}")
-            return None
-    
-    def get_model_activations(self, prompt: str, target_layer: int) -> torch.Tensor:
-        """
-        Get model activations at specified layer using nnsight.
-        
-        Args:
-            prompt: Input prompt
-            target_layer: Layer to extract activations from
-            
-        Returns:
-            torch.Tensor: Activations at the last token position
-        """
-        try:
-            # Use nnsight to get activations
             nnsight_model = self.model_interface.get_nnsight_model()
             if nnsight_model is None:
-                raise ValueError("Model doesn't support nnsight")
-            
-            # Get tokenizer from the model interface
-            if hasattr(self.model_interface, 'tokenizer') and self.model_interface.tokenizer is not None:
-                tokenizer = self.model_interface.tokenizer
-            elif hasattr(self.model_interface, 'hf_tokenizer') and self.model_interface.hf_tokenizer is not None:
-                tokenizer = self.model_interface.hf_tokenizer
-            else:
-                raise ValueError("No tokenizer available")
-            
-            # Tokenize input
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-            
-            with nnsight_model.trace(inputs['input_ids']):
-                # Extract activations from the specified layer
-                # For Qwen models, get the hidden states output
-                hidden_states = nnsight_model.model.layers[target_layer].output[0]
-                activations = hidden_states.save()
-            
-            # Debug: Check activation shape
-            print_timestamped_message(f"Activation shape: {activations.shape}")
-            
-            # Handle different activation shapes
-            if len(activations.shape) == 3:
-                # Expected shape: (batch_size, seq_len, hidden_size)
-                last_token_activations = activations[:, -1, :].detach().cpu()
-            elif len(activations.shape) == 2:
-                # If shape is (seq_len, hidden_size), take last position
-                last_token_activations = activations[-1, :].unsqueeze(0).detach().cpu()
-            else:
-                print_timestamped_message(f"Unexpected activation shape: {activations.shape}")
+                print_timestamped_message("⚠️ Model doesn't support nnsight")
                 return None
+                
+            # Tokenize the prompt
+            tokenizer = self.model_interface.tokenizer
+            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048)
+            inputs = {k: v.to(nnsight_model.device) for k, v in inputs.items()}
             
-            return last_token_activations
+            # Extract activations using nnsight
+            with nnsight_model.trace(inputs, validate=False):
+                # Access the transformer layers
+                if hasattr(nnsight_model, 'model') and hasattr(nnsight_model.model, 'layers'):
+                    layer_output = nnsight_model.model.layers[self.layer]
+                elif hasattr(nnsight_model, 'transformer') and hasattr(nnsight_model.transformer, 'h'):
+                    layer_output = nnsight_model.transformer.h[self.layer]
+                else:
+                    # Try direct layer access
+                    layer_output = nnsight_model.layers[self.layer]
+                
+                # Get the output activations (residual stream)
+                activations = layer_output.output[0].save()
+            
+            # Convert to numpy and take last token activations
+            activations_np = activations.cpu().numpy()
+            if len(activations_np.shape) == 3:
+                # Shape: [batch, seq_len, hidden_dim] - take last token
+                final_activations = activations_np[0, -1, :]
+            else:
+                # Shape: [seq_len, hidden_dim] - take last token  
+                final_activations = activations_np[-1, :]
+                
+            return final_activations
             
         except Exception as e:
             print_timestamped_message(f"Error extracting activations: {e}")
             return None
+        finally:
+            # Cleanup
+            gc.collect()
+            torch.cuda.empty_cache()
     
     def build_steering_vector(self) -> bool:
-        """
-        Build steering vector from contrasting activation pairs.
-        Reloads model for each extraction to prevent memory leaks.
-        
-        Returns:
-            bool: True if steering vector successfully created
-        """
+        """Build steering vector from contrasting pairs."""
+        if len(self.train_data) == 0:
+            return False
+            
         print_timestamped_message(f"Building steering vector from {len(self.train_data)} contrasting pairs...")
         
-        if not self.train_data:
-            print_timestamped_message("⚠️ No training data available")
-            return False
-        
-        baseline_activations = []
-        intervention_activations = []
+        wrong_activations = []
+        correct_activations = []
         
         for i, pair in enumerate(self.train_data):
             print_timestamped_message(f"Processing pair {i+1}/{len(self.train_data)}...")
             
-            # Get activations for baseline (wrong continuation) 
-            baseline_prompt = pair['baseline_prefix']
-            baseline_acts = self.get_model_activations(baseline_prompt, self.layer)
+            # Extract activations for wrong reasoning
+            wrong_acts = self.extract_activations(pair['wrong_cot'])
+            if wrong_acts is not None:
+                wrong_activations.append(wrong_acts)
             
-            if baseline_acts is None:
-                continue
-            
-            # Get activations for intervention (corrected response)
-            intervention_acts = self.get_model_activations(pair['intervention_response'][:len(baseline_prompt)], self.layer)
-            
-            if intervention_acts is None:
-                continue
-            
-            baseline_activations.append(baseline_acts)
-            intervention_activations.append(intervention_acts)
+            # Extract activations for correct reasoning
+            correct_acts = self.extract_activations(pair['correct_cot'])  
+            if correct_acts is not None:
+                correct_activations.append(correct_acts)
         
-        if len(baseline_activations) < 3:
-            print_timestamped_message(f"⚠️ Only got {len(baseline_activations)} valid activation pairs. Need at least 3.")
+        if len(wrong_activations) == 0 or len(correct_activations) == 0:
+            print_timestamped_message("⚠️ Failed to extract sufficient activations")
             return False
+            
+        # Compute steering vector as difference between means
+        wrong_mean = np.mean(wrong_activations, axis=0)
+        correct_mean = np.mean(correct_activations, axis=0)
         
-        # Calculate steering vector as mean difference
-        baseline_mean = torch.stack(baseline_activations).mean(dim=0)
-        intervention_mean = torch.stack(intervention_activations).mean(dim=0)
-        
-        # Steering vector points from baseline (no realization) to intervention (realization)
-        self.steering_vector = intervention_mean - baseline_mean
+        self.steering_vector = correct_mean - wrong_mean
         
         # Normalize the steering vector
-        self.steering_vector = self.steering_vector / torch.norm(self.steering_vector)
-        
-        print_timestamped_message(f"✅ Steering vector created with norm {torch.norm(self.steering_vector):.4f}")
-        print_timestamped_message(f"Vector shape: {self.steering_vector.shape}")
-        
+        vector_norm = np.linalg.norm(self.steering_vector)
+        if vector_norm > 0:
+            self.steering_vector = self.steering_vector / vector_norm
+            
+        print_timestamped_message(f"✅ Steering vector built with norm: {vector_norm:.3f}")
         return True
     
-    def apply_steering_to_generation(self, prompt: str, steering_strength: float = 1.0, max_new_tokens: int = 512) -> str:
-        """
-        Apply steering vector during generation using nnsight.
-        
-        Args:
-            prompt: Input prompt
-            steering_strength: Multiplier for steering vector strength
-            max_new_tokens: Maximum tokens to generate
-            
-        Returns:
-            str: Generated text with steering applied
-        """
+    def apply_steering_intervention(self, prompt: str, strength: float = 1.0) -> Optional[str]:
+        """Apply steering vector intervention during generation."""
         try:
             nnsight_model = self.model_interface.get_nnsight_model()
-            if nnsight_model is None:
-                return "Error: Model doesn't support nnsight"
+            if nnsight_model is None or self.steering_vector is None:
+                return None
+                
+            tokenizer = self.model_interface.tokenizer
+            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=2048)
+            inputs = {k: v.to(nnsight_model.device) for k, v in inputs.items()}
             
-            # Get tokenizer
-            if hasattr(self.model_interface, 'tokenizer') and self.model_interface.tokenizer is not None:
-                tokenizer = self.model_interface.tokenizer
-            elif hasattr(self.model_interface, 'hf_tokenizer') and self.model_interface.hf_tokenizer is not None:
-                tokenizer = self.model_interface.hf_tokenizer
-            else:
-                return "Error: No tokenizer available"
+            # Convert steering vector to tensor
+            steering_tensor = torch.tensor(
+                self.steering_vector * strength, 
+                device=nnsight_model.device, 
+                dtype=torch.float32
+            )
             
-            # Tokenize prompt
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-            input_ids = inputs['input_ids']
+            # Apply steering intervention during generation
+            with nnsight_model.trace(inputs, validate=False):
+                # Access the layer where we want to apply steering
+                if hasattr(nnsight_model, 'model') and hasattr(nnsight_model.model, 'layers'):
+                    layer_output = nnsight_model.model.layers[self.layer]
+                elif hasattr(nnsight_model, 'transformer') and hasattr(nnsight_model.transformer, 'h'):
+                    layer_output = nnsight_model.transformer.h[self.layer]
+                else:
+                    layer_output = nnsight_model.layers[self.layer]
+                
+                # Add steering vector to the layer output at the last token position
+                layer_activations = layer_output.output[0]
+                layer_activations[:, -1, :] += steering_tensor
             
-            # For simplicity, let's use a simpler approach: 
-            # Generate normally and then apply steering at the intervention point
-            # This is more robust than trying to steer during generation
-            
-            # First, get the model without nnsight for generation
-            if hasattr(self.model_interface, 'generate'):
-                # Use the model interface's generate method (which uses API for hybrid models)
-                generated_text = self.model_interface.generate(
-                    prompt, 
-                    max_new_tokens=max_new_tokens,
-                    temperature=0.3,
-                    do_sample=True
+            # Generate continuation with the steered activations
+            with torch.no_grad():
+                output = nnsight_model.generate(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                    max_new_tokens=1024,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
                 )
-                
-                # Apply a simple "corrective" bias to the generated text
-                # Since we can't easily steer during generation with the API model,
-                # we'll focus on the representation analysis
-                return generated_text
-                
-            else:
-                return "Error: No generation method available"
+            
+            # Decode the new tokens
+            new_tokens = output[0][inputs["input_ids"].shape[1]:]
+            response = tokenizer.decode(new_tokens, skip_special_tokens=True)
+            
+            return response
             
         except Exception as e:
-            return f"Error during steering generation: {str(e)}"
+            print_timestamped_message(f"Error applying steering intervention: {e}")
+            return None
+        finally:
+            gc.collect()
+            torch.cuda.empty_cache()
     
-    def run_validation_experiment(self, steering_strength: float = 1.0) -> pd.DataFrame:
-        """
-        Run steering experiment on validation set.
-        
-        Args:
-            steering_strength: Strength of steering vector to apply
+    def validate_steering(self, strength: float = 1.0) -> Optional[pd.DataFrame]:
+        """Apply steering vector to validation data and evaluate performance."""
+        if self.steering_vector is None or len(self.validation_data) == 0:
+            print_timestamped_message("⚠️ No steering vector or validation data available")
+            return None
             
-        Returns:
-            pd.DataFrame: Results of steering experiment
-        """
-        print_timestamped_message(f"Running steering validation on {len(self.validation_data)} problems...")
+        print_timestamped_message(f"Validating steering on {len(self.validation_data)} examples...")
         
-        if self.steering_vector is None:
-            print_timestamped_message("⚠️ No steering vector available. Run build_steering_vector() first.")
-            return pd.DataFrame()
+        validation_results = []
         
-        results = []
-        
-        for i, data in enumerate(self.validation_data):
-            print_timestamped_message(f"Validating problem {i+1}/{len(self.validation_data)}...")
+        for i, pair in enumerate(self.validation_data):
+            print_timestamped_message(f"Validating pair {i+1}/{len(self.validation_data)}...")
             
-            # Apply steering right after the error location
-            baseline_prefix = data['baseline_prefix']
-            
-            # Generate with steering
-            steered_response = self.apply_steering_to_generation(
-                baseline_prefix, 
-                steering_strength=steering_strength
-            )
-            
-            if steered_response.startswith("Error"):
-                print_timestamped_message(f"⚠️ Steering failed: {steered_response}")
-                results.append({
-                    'problem_id': data['problem_id'],
-                    'problem_text': data['problem_text'],
-                    'ground_truth': data['ground_truth'],
-                    'baseline_prefix': baseline_prefix,
-                    'steered_response': steered_response,
-                    'full_steered_output': baseline_prefix + steered_response,
-                    'is_corrected': False,
-                    'generated_answer': None,
-                    'evaluation_method': 'steering_failed'
-                })
-                continue
-            
-            # Combine prefix + steered response
-            full_steered_output = baseline_prefix + steered_response
-            
-            # Evaluate the steered response
-            eval_result = evaluate_answer(
-                data['problem_text'],
-                data['ground_truth'],
-                full_steered_output
-            )
-            
-            results.append({
-                'problem_id': data['problem_id'],
-                'problem_text': data['problem_text'],
-                'ground_truth': data['ground_truth'],
-                'baseline_prefix': baseline_prefix,
-                'steered_response': steered_response,
-                'full_steered_output': full_steered_output,
-                'is_corrected': eval_result['is_correct'],
-                'generated_answer': eval_result['generated_answer'],
-                'evaluation_method': eval_result['evaluation_method'],
-                'error_line': data['error_line']
-            })
-        
-        results_df = pd.DataFrame(results)
-        
-        if not results_df.empty:
-            success_rate = (results_df['is_corrected'].sum() / len(results_df)) * 100
-            print_timestamped_message(f"✅ Steering success rate: {success_rate:.1f}% ({results_df['is_corrected'].sum()}/{len(results_df)})")
-        
-        return results_df
+            try:
+                # Apply steering intervention to the wrong CoT
+                steered_response = self.apply_steering_intervention(pair['wrong_cot'], strength)
+                
+                if steered_response:
+                    # Evaluate the steered response using the existing evaluation system
+                    from low_level import smart_evaluate_answer
+                    is_correct = smart_evaluate_answer(
+                        steered_response, 
+                        pair['correct_answer'], 
+                        pair['problem_text']
+                    )
+                    
+                    validation_results.append({
+                        'problem_id': pair['problem_id'],
+                        'original_wrong': pair['wrong_cot'],
+                        'steered_response': steered_response,
+                        'is_corrected': is_correct,
+                        'steering_strength': strength,
+                        'layer': self.layer
+                    })
+                    
+            except Exception as e:
+                print_timestamped_message(f"Error validating pair {i+1}: {e}")
+                
+        if validation_results:
+            df = pd.DataFrame(validation_results)
+            success_rate = (df['is_corrected'].sum() / len(df)) * 100
+            print_timestamped_message(f"✅ Steering validation completed: {success_rate:.1f}% success rate")
+            return df
+        else:
+            print_timestamped_message("⚠️ No validation results generated")
+            return None
 
 
-def run_nnsight_steering_experiment(model_interface, results_dir: str, layer: int = 25, steering_strength: float = 1.0) -> Optional[pd.DataFrame]:
+def run_nnsight_steering_experiment(model_interface, results_dir: str, layer: int = 16, steering_strength: float = 1.0) -> Optional[pd.DataFrame]:
     """
-    Main function to run the complete nnsight steering experiment.
+    Run the complete nnsight steering experiment.
     
     Args:
         model_interface: Model interface supporting nnsight
-        results_dir: Directory with experiment results
-        layer: Layer to use for steering
-        steering_strength: Strength of steering to apply
+        results_dir: Directory containing experiment results
+        layer: Layer to extract activations from
+        steering_strength: Strength of steering intervention
         
     Returns:
-        Optional[pd.DataFrame]: Steering results if successful
+        DataFrame with validation results or None if failed
     """
     print_timestamped_message("🎯 Starting NNsight Steering Vector Experiment")
     print_timestamped_message(f"Target layer: {layer}, Steering strength: {steering_strength}")
@@ -430,22 +316,23 @@ def run_nnsight_steering_experiment(model_interface, results_dir: str, layer: in
     # Initialize experiment
     experiment = NNsightSteeringExperiment(model_interface, results_dir, layer)
     
-    # Extract contrasting pairs
+    # Extract contrasting pairs from existing baseline and intervention data
     if not experiment.extract_contrasting_pairs():
         print_timestamped_message("❌ Failed to extract sufficient contrasting pairs")
         return None
     
-    # Build steering vector
+    # Build steering vector from contrasting activations
     if not experiment.build_steering_vector():
         print_timestamped_message("❌ Failed to build steering vector")
         return None
     
-    # Run validation experiment
-    results_df = experiment.run_validation_experiment(steering_strength)
+    # Validate steering on held-out data
+    results_df = experiment.validate_steering(steering_strength)
     
-    if results_df.empty:
-        print_timestamped_message("❌ Validation experiment produced no results")
-        return None
+    if results_df is not None:
+        success_rate = (results_df['is_corrected'].sum() / len(results_df)) * 100
+        print_timestamped_message(f"🎯 NNsight steering experiment completed: {success_rate:.1f}% success rate")
+    else:
+        print_timestamped_message("❌ Steering validation failed")
     
-    print_timestamped_message("✅ NNsight steering experiment completed successfully")
     return results_df

@@ -62,15 +62,25 @@ class HuggingFaceModel(ModelInterface):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Native loading for all models - no quantization for better activation analysis
-        print_timestamped_message("Loading model natively with bfloat16 precision...")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            torch_dtype=torch.bfloat16,
-            device_map={"": 0},  # Force everything on GPU 0 for predictable memory management
-            trust_remote_code=True,
-            low_cpu_mem_usage=True
-        )
+        # Native loading for Qwen3 models - use auto settings as per official documentation
+        if "qwen3" in self.model_id.lower():
+            print_timestamped_message("Loading Qwen3 model natively with auto precision...")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                torch_dtype="auto",  # Auto precision as recommended for Qwen3
+                device_map="auto",   # Auto device mapping as recommended
+                trust_remote_code=True
+            )
+        else:
+            # Standard loading for other models
+            print_timestamped_message("Loading model natively with bfloat16 precision...")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                torch_dtype=torch.bfloat16,
+                device_map={"": 0},  # Force everything on GPU 0 for predictable memory management
+                trust_remote_code=True,
+                low_cpu_mem_usage=True
+            )
         
         print_timestamped_message("HuggingFace model loaded successfully.")
         print_timestamped_message(f"Model device: {next(self.model.parameters()).device}")
@@ -115,8 +125,8 @@ class HuggingFaceModel(ModelInterface):
     
     def get_model_id(self) -> str:
         # Normalize Qwen model IDs to match Nebius cache keys
-        if "qwen3" in self.model_id.lower() or "qwen/qwen3" in self.model_id.lower():
-            return "nebius-Qwen/Qwen3-14B"  # Match the Nebius cache format
+        if ("qwen3" in self.model_id.lower() or "qwen/qwen3" in self.model_id.lower()):
+            return "nebius-Qwen/Qwen3-14B"  # Match the Nebius cache format for all Qwen3-14B variants (including FP8)
         return self.model_id
     
     def get_model_for_patching(self) -> HookedTransformer:
