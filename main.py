@@ -141,7 +141,7 @@ for model_config in MODELS_TO_TEST:
     # PHASE 2D: NNSIGHT STEERING VECTOR EXPERIMENT  
     # ============================================================
     steering_df = None
-    if model.get_model_id() == "nebius-Qwen/Qwen3-14B": # Only run steering for the target model
+    if model.get_model_id() == "Qwen/Qwen3-14B": # Only run steering for the target model
         core.print_timestamped_message("")
         core.print_timestamped_message("=" * 60)
         core.print_timestamped_message("🎯 STARTING NNSIGHT STEERING EXPERIMENT")
