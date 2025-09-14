@@ -36,33 +36,20 @@ def create_database(db_path):
     """)
     
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS activation_patching_results (
-            timestamp TEXT,
-            model_id TEXT,
-            patching_setup TEXT,
-            component_name TEXT,
-            max_recovery REAL,
-            mean_recovery REAL,
-            min_recovery REAL,
-            best_layer INTEGER,
-            best_position INTEGER,
-            recovery_matrix TEXT
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS steering_results (
+        CREATE TABLE IF NOT EXISTS nnsight_steering_results (
             timestamp TEXT,
             model_id TEXT,
             layer INTEGER,
-            train_problems_count INTEGER,
-            validation_problems_count INTEGER,
+            steering_strength REAL,
+            train_pairs_count INTEGER,
+            validation_pairs_count INTEGER,
             success_rate REAL,
             successful_corrections INTEGER,
-            steering_vector TEXT,
+            steering_vector_norm REAL,
             validation_results TEXT
         )
     """)
+    
     
     conn.commit()
     conn.close()
@@ -154,86 +141,7 @@ def insert_intervention_result(results_dir, problem, intervention_raw_input_prom
     conn.commit()
     conn.close()
 
-def insert_activation_patching_result(results_dir, model_id, patching_setup, component_name, 
-                                     recovery_matrix):
-    """Insert activation patching results for a component."""
-    import numpy as np
-    
-    conn = get_db_connection(results_dir)
-    cursor = conn.cursor()
-    
-    # Calculate statistics
-    data_array = np.array(recovery_matrix)
-    max_recovery = float(np.max(data_array))
-    mean_recovery = float(np.mean(data_array))
-    min_recovery = float(np.min(data_array))
-    
-    # Find best position
-    best_pos = np.unravel_index(np.argmax(data_array), data_array.shape)
-    best_layer = int(best_pos[0])
-    best_position = int(best_pos[1])
-    
-    # Convert patching_setup to JSON-serializable format
-    setup_for_json = {}
-    for key, value in patching_setup.items():
-        if hasattr(value, 'to_dict'):  # DataFrame or Series
-            setup_for_json[key] = {
-                'type': 'dataframe',
-                'shape': getattr(value, 'shape', None),
-                'columns': getattr(value, 'columns', None).tolist() if hasattr(value, 'columns') else None,
-                'summary': f"{type(value).__name__} with {len(value)} rows" if hasattr(value, '__len__') else str(type(value))
-            }
-        else:
-            setup_for_json[key] = value
-    
-    cursor.execute("""
-        INSERT INTO activation_patching_results 
-        (timestamp, model_id, patching_setup, component_name, max_recovery, 
-         mean_recovery, min_recovery, best_layer, best_position, recovery_matrix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        get_timestamp_in_rome(),
-        model_id,
-        json.dumps(setup_for_json),
-        component_name,
-        max_recovery,
-        mean_recovery,
-        min_recovery,
-        best_layer,
-        best_position,
-        json.dumps(data_array.tolist())
-    ))
-    
-    conn.commit()
-    conn.close()
 
-def insert_steering_result(results_dir, model_id, layer, train_problems_count, validation_problems_count,
-                          success_rate, successful_corrections, steering_vector, validation_results):
-    """Insert steering experiment results."""
-    import numpy as np
-    
-    conn = get_db_connection(results_dir)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        INSERT INTO steering_results 
-        (timestamp, model_id, layer, train_problems_count, validation_problems_count,
-         success_rate, successful_corrections, steering_vector, validation_results)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        get_timestamp_in_rome(),
-        model_id,
-        layer,
-        train_problems_count,
-        validation_problems_count,
-        success_rate,
-        successful_corrections,
-        json.dumps(steering_vector.tolist() if hasattr(steering_vector, 'tolist') else None),
-        json.dumps(validation_results)
-    ))
-    
-    conn.commit()
-    conn.close()
 
 def get_experiment_results(results_dir):
     """Get all experiment results as a list of dictionaries."""
@@ -255,27 +163,6 @@ def get_experiment_results(results_dir):
     conn.close()
     return results
 
-def get_activation_patching_results(results_dir):
-    """Get all activation patching results as a list of dictionaries."""
-    conn = get_db_connection(results_dir)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM activation_patching_results")
-    columns = [description[0] for description in cursor.description]
-    rows = cursor.fetchall()
-    
-    results = []
-    for row in rows:
-        result_dict = dict(zip(columns, row))
-        # Parse JSON fields
-        if result_dict['patching_setup']:
-            result_dict['patching_setup'] = json.loads(result_dict['patching_setup'])
-        if result_dict['recovery_matrix']:
-            result_dict['recovery_matrix'] = json.loads(result_dict['recovery_matrix'])
-        results.append(result_dict)
-    
-    conn.close()
-    return results
 
 def print_database_summary(results_dir):
     """Print a summary of the database contents."""
@@ -301,38 +188,43 @@ def print_database_summary(results_dir):
         cursor.execute("SELECT COUNT(*) FROM experiment_results WHERE intervention_correct = 1")
         intervention_correct = cursor.fetchone()[0]
         
-        # Activation patching results
-        cursor.execute("SELECT COUNT(*) FROM activation_patching_results")
-        patching_count = cursor.fetchone()[0]
-        
-        # Steering results
-        cursor.execute("SELECT COUNT(*) FROM steering_results")
-        steering_count = cursor.fetchone()[0]
-        
         print(f"📊 Database Summary:")
         print(f"   Total problems: {total}")
         print(f"   Baseline completed: {baseline_count} ({baseline_correct} correct)")
         if intervention_count > 0:
             print(f"   Interventions completed: {intervention_count} ({intervention_correct} corrected)")
-        if patching_count > 0:
-            print(f"   Activation patching components: {patching_count}")
-            
-            # Show best recovery for each component
-            cursor.execute("SELECT component_name, max_recovery, best_layer, best_position FROM activation_patching_results ORDER BY max_recovery DESC")
-            patching_results = cursor.fetchall()
-            for component, max_rec, layer, pos in patching_results:
-                print(f"     {component}: Max recovery {max_rec:.3f} at Layer {layer}, Position {pos}")
-        
-        if steering_count > 0:
-            print(f"   Steering experiments: {steering_count}")
-            
-            # Show steering results
-            cursor.execute("SELECT layer, success_rate, successful_corrections, validation_problems_count FROM steering_results ORDER BY success_rate DESC")
-            steering_results = cursor.fetchall()
-            for layer, success_rate, corrections, total_val in steering_results:
-                print(f"     Layer {layer}: {success_rate:.1f}% success ({corrections}/{total_val})")
+            intervention_rate = (intervention_correct / intervention_count * 100) if intervention_count > 0 else 0
+            print(f"   Intervention success rate: {intervention_rate:.1f}%")
         
         conn.close()
         
     except Exception as e:
         print(f"Could not read database summary: {e}")
+
+def insert_nnsight_steering_result(results_dir, model_id, layer, steering_strength, train_pairs_count, 
+                                  validation_pairs_count, success_rate, successful_corrections, 
+                                  steering_vector_norm, validation_results):
+    """Insert NNsight steering experiment results into database."""
+    conn = get_db_connection(results_dir)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT INTO nnsight_steering_results 
+        (timestamp, model_id, layer, steering_strength, train_pairs_count, validation_pairs_count,
+         success_rate, successful_corrections, steering_vector_norm, validation_results)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        get_timestamp_in_rome(),
+        model_id,
+        layer,
+        steering_strength,
+        train_pairs_count,
+        validation_pairs_count,
+        success_rate,
+        successful_corrections,
+        steering_vector_norm,
+        json.dumps(validation_results) if validation_results else None
+    ))
+    
+    conn.commit()
+    conn.close()
