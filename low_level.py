@@ -25,8 +25,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def select_diverse_problems(total_problems_wanted=30, debug_mode=False, seed=42):
     """
-    Select problems from all MATH subjects and difficulty levels.
-    Higher levels get proportionally more problems since they're harder.
+    Select problems from all MATH subjects with heavy bias toward harder problems.
+    Heavily weights Level 4-5 problems to maximize errors for correction experiments.
     Selection is deterministic for reproducible experiments.
     
     Args:
@@ -35,7 +35,7 @@ def select_diverse_problems(total_problems_wanted=30, debug_mode=False, seed=42)
         seed: Random seed for deterministic selection
         
     Returns:
-        List of problem dictionaries with added metadata
+        List of problem dictionaries with added metadata (skewed toward hard problems)
     """
     from datasets import load_dataset
     import random
@@ -47,25 +47,25 @@ def select_diverse_problems(total_problems_wanted=30, debug_mode=False, seed=42)
         total_problems_wanted = 10
         print_timestamped_message(f"🔧 DEBUG MODE: Selecting {total_problems_wanted} problems (seed={seed})")
     else:
-        print_timestamped_message(f"📊 Selecting {total_problems_wanted} diverse problems from MATH dataset (seed={seed})")
+        print_timestamped_message(f"📊 Selecting {total_problems_wanted} problems heavily biased toward hard problems (seed={seed})")
     
     subjects = [
-        'prealgebra',      # Easier start
-        'algebra', 
-        'geometry',
-        'number_theory',
-        'counting_and_probability',
-        'intermediate_algebra',  # Harder
-        'precalculus'     # Hardest
+        'precalculus',           # Hardest - prioritize
+        'intermediate_algebra',  # Very hard
+        'counting_and_probability',  # Hard
+        'number_theory',         # Moderately hard
+        'geometry',              # Moderate
+        'algebra',               # Easier
+        'prealgebra'             # Easiest - minimal
     ]
     
-    # Level weights: higher levels get more problems (they're harder and more interesting)
+    # Level weights: heavily favor harder problems to get more errors to correct
     level_weights = {
-        'Level 1': 1,
+        'Level 1': 1,    # Easiest - minimal weight
         'Level 2': 2, 
-        'Level 3': 3,
-        'Level 4': 4,
-        'Level 5': 5   # Hardest problems get most weight
+        'Level 3': 6,    # Start ramping up
+        'Level 4': 12,   # Heavy weight on hard problems
+        'Level 5': 20    # Maximum weight on hardest problems
     }
     
     selected_problems = []

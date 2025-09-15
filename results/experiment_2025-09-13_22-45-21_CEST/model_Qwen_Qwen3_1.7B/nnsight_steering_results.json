@@ -1,0 +1,26 @@
+[
+    {
+        "problem_id":"mock_problem_0",
+        "original_wrong":"Mock wrong reasoning 0",
+        "steered_response":"Mock steered response 0",
+        "is_corrected":true,
+        "steering_strength":1.0,
+        "layer":16
+    },
+    {
+        "problem_id":"mock_problem_1",
+        "original_wrong":"Mock wrong reasoning 1",
+        "steered_response":"Mock steered response 1",
+        "is_corrected":false,
+        "steering_strength":1.0,
+        "layer":16
+    },
+    {
+        "problem_id":"mock_problem_2",
+        "original_wrong":"Mock wrong reasoning 2",
+        "steered_response":"Mock steered response 2",
+        "is_corrected":true,
+        "steering_strength":1.0,
+        "layer":16
+    }
+]

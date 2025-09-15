@@ -11,8 +11,6 @@ wheels/
 .venv
 
 # Results and cache directories
-results/
-cache/
 results_old/
 cache_backup/
 

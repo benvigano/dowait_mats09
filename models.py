@@ -45,11 +45,12 @@ class ModelInterface(ABC):
 class HuggingFaceModel(ModelInterface):
     """HuggingFace transformers implementation."""
     
-    def __init__(self, model_id: str):
+    def __init__(self, model_id: str, load_now: bool = True):
         self.model_id = model_id
         self.model = None
         self.tokenizer = None
-        self._load_model()
+        if load_now:
+            self._load_model()
     
     def _load_model(self):
         """Load the HuggingFace model and tokenizer."""
@@ -129,6 +130,11 @@ class HuggingFaceModel(ModelInterface):
             return "nebius-Qwen/Qwen3-14B"  # Match the Nebius cache format for all Qwen3-14B variants (including FP8)
         return self.model_id
     
+    def set_cache_model_id(self, cache_model_id: str):
+        """Temporarily override the model ID for cache compatibility."""
+        self._original_model_id = self.model_id
+        self.model_id = cache_model_id
+    
     def get_model_for_patching(self) -> HookedTransformer:
         """
         Return a HookedTransformer instance for patching.
@@ -160,28 +166,31 @@ class HuggingFaceModel(ModelInterface):
         return self.hooked_model
     
     def get_nnsight_model(self) -> Any:
-        """Return model for nnsight operations. Reloads with int4 quantization if needed."""
+        """Return model for nnsight operations. Reloads with float16 to ensure compatibility."""
         try:
             import nnsight
             
-            # Print memory status before loading
-            if torch.cuda.is_available():
-                gpu_memory_before = torch.cuda.memory_allocated() / 1024**3
-                print_timestamped_message(f"GPU memory before loading: {gpu_memory_before:.2f}GB")
-            
-            # Always reload the model for nnsight to ensure clean state
-            print_timestamped_message("Loading fresh model instance for nnsight operations...")
+            # Always reload the model for nnsight to ensure clean state and correct dtype
+            print_timestamped_message("Loading model for nnsight operations...")
             if self.model is not None:
                 # Clear existing model first
                 self.model = drop_model_from_memory(self.model)
             
-            # Reload model (will use int4 quantization for Qwen3)
-            self._load_model()
+            # Reload model with float16 for nnsight compatibility
+            # Re-create tokenizer if it's not there (can happen if load_now=False)
+            if self.tokenizer is None:
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                torch_dtype=torch.float16,  # Use float16 for better nnsight compatibility
+                device_map="auto",
+                trust_remote_code=True,
+            )
             
-            # Print memory status after loading
-            if torch.cuda.is_available():
-                gpu_memory_after = torch.cuda.memory_allocated() / 1024**3
-                print_timestamped_message(f"GPU memory after loading: {gpu_memory_after:.2f}GB")
+            # Model loaded successfully
             
             # Wrap with nnsight - this allows us to trace activations
             nnsight_model = nnsight.LanguageModel(self.model, tokenizer=self.tokenizer)
@@ -191,6 +200,8 @@ class HuggingFaceModel(ModelInterface):
             return None
         except Exception as e:
             print_timestamped_message(f"⚠️ Failed to create nnsight model: {e}")
+            import traceback
+            print_timestamped_message(f"Detailed error: {traceback.format_exc()}")
             return None
 
 
@@ -388,7 +399,6 @@ def create_model(model_type: str, model_id: str) -> ModelInterface:
 def drop_model_from_memory(model):
     """Aggressively drop a model from memory to prevent OOM."""
     if model is not None:
-        print_timestamped_message("🗑️ Dropping model from memory to prevent OOM...")
         
         # If it's our model interface, get the underlying model
         if hasattr(model, 'model'):
@@ -415,7 +425,6 @@ def drop_model_from_memory(model):
                 gc.collect()
                 torch.cuda.empty_cache()
         
-        print_timestamped_message("✅ Model dropped from memory")
         return None
     return model
 
